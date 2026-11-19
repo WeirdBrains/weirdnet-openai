@@ -1,0 +1,40 @@
+# weirdnet-openai
+
+A loopback-only OpenAI-compatible bridge over a
+[`weirdnet-agent`](https://crates.io/crates/weirdnet-agent) 0.4 inference `Pool`. Local tools
+that speak the OpenAI API (editors, notebooks, `curl`) reach the user's inference nodes
+through it.
+
+| Route | |
+|---|---|
+| `POST /v1/chat/completions` | streaming (SSE, `data: [DONE]`) or not; reasoning as `reasoning_content`; tool calls; usage |
+| `GET /v1/models` | the pool catalog, with `weirdnet: {state, purpose, replicas, context, revision}` |
+| `POST /v1/embeddings` | float vectors |
+| `GET /metrics` | Prometheus: `weirdnet_bridge_{requests,errors,cache_hits,standin}_total` |
+| `POST /v1/completions` | 501: infer/2 carries chat messages, not raw prompts |
+
+Security: it binds `127.0.0.1` only, checks the `Host` header against its own address (DNS
+rebinding), requires a bearer token of at least 16 characters (`new_token()` makes one;
+compared in constant time) and sends no CORS headers, so web pages can't call it.
+
+Headers: `x-weirdnet-model` (the model that answered), `x-weirdnet-cache: hit` and
+`x-weirdnet-standin: <model>` when the pool says so. Send `x-wait: 1` to wait for the requested
+model instead of a stand-in. Non-streaming answers also carry
+`weirdnet: {standin, cache_hit, served_by}`; streams carry it on the final chunk (the stream's
+headers are sent when a node accepts the request, so there the stand-in is inferred from the
+accepted model and the cache flag arrives only in the final chunk).
+
+```rust
+use std::sync::Arc;
+use weirdnet_openai::{Bridge, BridgeOptions, new_token};
+
+let token = new_token(); // show it to the user once; keep it in their keychain
+let bridge = Bridge::bind(BridgeOptions::new(11435, token)).await?;
+bridge.serve(Arc::new(pool), shutdown).await?;
+```
+
+Requests map onto infer/2: messages (string content or text parts; other parts are refused
+with 400), `temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`/`max_completion_tokens`,
+`stop`, `presence_penalty`, `frequency_penalty`, `repeat_penalty`/`repetition_penalty`,
+`seed`, `response_format` (text, `json_object`, `json_schema`) and function `tools`. Other
+parameters are ignored. Dropping a response cancels the pool request.
