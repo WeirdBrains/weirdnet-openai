@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-19
+
 ### Added
 
 - `Bridge`: a loopback-only OpenAI-compatible server over a `weirdnet-agent` 0.4 `Pool`: `/v1/chat/completions` (streaming and not, reasoning, tool calls, usage), `/v1/models` from the pool catalog, `/v1/embeddings` and Prometheus `/metrics`.
