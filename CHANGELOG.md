@@ -8,6 +8,10 @@
 - Streamed answers carry `x-weirdnet-cache: hit` too: after a node accepts, headers wait up to `EARLY_META_WAIT` (1.5 s) for its early metadata or first output. Nodes before 0.4.1 report hits only at the end, in the final chunk's `weirdnet.cache_hit` and the metric.
 - `/v1/embeddings` reports the node's real `usage.prompt_tokens` (0 from nodes before 0.4.1).
 
+### Fixed
+
+- A node's `BadRequest` on `/v1/embeddings` (say, a model that does not embed) is a 400 again, not a 503: the pool keeps error kinds (`weirdnet-agent` 0.4.1).
+
 ### Changed
 
 - Needs `weirdnet-agent` 0.4.1.

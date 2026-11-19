@@ -112,6 +112,9 @@ impl InferHost for Host {
         Ok(Arc::new(Fake { model: model.into(), cancelled: self.cancelled.clone() }))
     }
     fn open_embed(&self, _caller: &Caller, model: Option<&str>) -> Result<Arc<dyn EmbedBackend>, RemoteError> {
+        if model == Some("chat-only") {
+            return Err(RemoteError::BadRequest { message: "chat-only is not an embedding model".into() });
+        }
         Ok(Arc::new(Fake { model: model.unwrap_or("e").into(), cancelled: self.cancelled.clone() }))
     }
 }
@@ -283,6 +286,12 @@ async fn embeddings_with_usage() {
     assert_eq!(v["data"][1]["index"], 1);
     assert_eq!(v["data"][1]["embedding"][0], 4.0);
     assert_eq!(v["usage"], json!({"prompt_tokens": 6, "total_tokens": 6}));
+    // A node's bad request stays a 400 through the pool (it used to become a 503).
+    let r =
+        c.post(format!("http://{addr}/v1/embeddings")).bearer_auth(TOKEN).json(&json!({"input": "x", "model": "chat-only"})).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "bad_request");
     let r = c
         .post(format!("http://{addr}/v1/embeddings"))
         .bearer_auth(TOKEN)

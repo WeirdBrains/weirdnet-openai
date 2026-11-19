@@ -969,7 +969,7 @@ dependencies = [
 [[package]]
 name = "weirdnet-agent"
 version = "0.4.0"
-source = "git+https://github.com/WeirdBrains/weirdnet-agent?rev=455b0c10942d5d7e7875f562c5b4aba50f0ca43a#455b0c10942d5d7e7875f562c5b4aba50f0ca43a"
+source = "git+https://github.com/WeirdBrains/weirdnet-agent?rev=2a5f5e28266cf04cc3eff03c90205e749bc59e34#2a5f5e28266cf04cc3eff03c90205e749bc59e34"
 dependencies = [
  "async-trait",
  "cbor4ii",

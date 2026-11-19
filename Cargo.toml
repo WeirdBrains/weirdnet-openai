@@ -31,4 +31,4 @@ all-features = true
 
 # Unreleased weirdnet-agent 0.4.1 work on main; drop this and require "=0.4.1" when it is published.
 [patch.crates-io]
-weirdnet-agent = { git = "https://github.com/WeirdBrains/weirdnet-agent", rev = "455b0c10942d5d7e7875f562c5b4aba50f0ca43a" }
+weirdnet-agent = { git = "https://github.com/WeirdBrains/weirdnet-agent", rev = "2a5f5e28266cf04cc3eff03c90205e749bc59e34" }
