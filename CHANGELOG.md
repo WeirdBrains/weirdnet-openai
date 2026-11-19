@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-19
+
 ### Added
 
 - `/v1/completions` works: the prompt goes to the pool as an infer/2 raw prompt (`weirdnet-agent` 0.4.1), whole or streamed (`text_completion` chunks). Sampling parameters and `seed` map as for chat; `n`/`best_of` above 1, `echo`, `suffix` and `logprobs` are refused with 400; a node that can't take raw prompts answers 501.
