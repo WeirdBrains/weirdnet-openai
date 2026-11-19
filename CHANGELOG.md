@@ -14,7 +14,7 @@
 
 ### Changed
 
-- Needs `weirdnet-agent` 0.4.1.
+- Depends on `weirdnet-agent` `"0.4.1"` (a caret requirement, not an exact pin).
 - A cache hit found only at the end of a stream is counted once in `weirdnet_bridge_cache_hits_total`.
 
 ## [0.1.0] - 2026-11-19
