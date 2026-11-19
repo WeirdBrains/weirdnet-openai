@@ -9,9 +9,9 @@ through it.
 |---|---|
 | `POST /v1/chat/completions` | streaming (SSE, `data: [DONE]`) or not; reasoning as `reasoning_content`; tool calls; usage |
 | `GET /v1/models` | the pool catalog, with `weirdnet: {state, purpose, replicas, context, revision}` |
-| `POST /v1/embeddings` | float vectors |
+| `POST /v1/completions` | a raw prompt (one per request), streaming or not; usage; 501 from nodes that can't take raw prompts |
+| `POST /v1/embeddings` | float vectors; `usage.prompt_tokens` from the node |
 | `GET /metrics` | Prometheus: `weirdnet_bridge_{requests,errors,cache_hits,standin}_total` |
-| `POST /v1/completions` | 501: infer/2 carries chat messages, not raw prompts |
 
 Security: it binds `127.0.0.1` only, checks the `Host` header against its own address (DNS
 rebinding), requires a bearer token of at least 16 characters (`new_token()` makes one;
@@ -20,9 +20,10 @@ compared in constant time) and sends no CORS headers, so web pages can't call it
 Headers: `x-weirdnet-model` (the model that answered), `x-weirdnet-cache: hit` and
 `x-weirdnet-standin: <model>` when the pool says so. Send `x-wait: 1` to wait for the requested
 model instead of a stand-in. Non-streaming answers also carry
-`weirdnet: {standin, cache_hit, served_by}`; streams carry it on the final chunk (the stream's
-headers are sent when a node accepts the request, so there the stand-in is inferred from the
-accepted model and the cache flag arrives only in the final chunk).
+`weirdnet: {standin, cache_hit, served_by}`; streams carry it on the final chunk. A stream's
+headers are sent once a node accepted the request and sent its early metadata or first output
+(at most `EARLY_META_WAIT`, 1.5 s, later), so `x-weirdnet-cache: hit` is on streams too; from
+nodes before `weirdnet-agent` 0.4.1 the cache flag arrives only in the final chunk.
 
 ```rust
 use std::sync::Arc;

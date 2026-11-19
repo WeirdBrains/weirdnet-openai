@@ -137,15 +137,23 @@ pub fn chat(body: Value) -> Result<(Request, bool), BadRequest> {
     };
     let stream = o.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let mut req = Request::messages(messages);
-    req.model = model(&o)?;
+    sampling_and_seed(&o, &mut req)?;
+    req.response_format = response_format(o.get("response_format"))?;
+    req.tools = tools(o.get("tools"))?;
+    Ok((req, stream))
+}
+
+/// `model`, sampling parameters and `seed`, shared by chat and text completions.
+fn sampling_and_seed(o: &Map<String, Value>, req: &mut Request) -> Result<(), BadRequest> {
+    req.model = model(o)?;
     let s = &mut req.sampling;
-    s.temperature = f32_of(&o, "temperature")?;
-    s.top_p = f32_of(&o, "top_p")?;
-    s.top_k = u32_of(&o, "top_k")?;
-    s.min_p = f32_of(&o, "min_p")?;
-    s.max_tokens = match u32_of(&o, "max_completion_tokens")? {
+    s.temperature = f32_of(o, "temperature")?;
+    s.top_p = f32_of(o, "top_p")?;
+    s.top_k = u32_of(o, "top_k")?;
+    s.min_p = f32_of(o, "min_p")?;
+    s.max_tokens = match u32_of(o, "max_completion_tokens")? {
         Some(n) => Some(n),
-        None => u32_of(&o, "max_tokens")?,
+        None => u32_of(o, "max_tokens")?,
     };
     s.stop = match o.get("stop") {
         None | Some(Value::Null) => Vec::new(),
@@ -153,18 +161,46 @@ pub fn chat(body: Value) -> Result<(Request, bool), BadRequest> {
         Some(Value::Array(a)) if a.iter().all(Value::is_string) => a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
         Some(_) => return Err(bad("`stop` must be a string or an array of strings")),
     };
-    s.presence_penalty = f32_of(&o, "presence_penalty")?;
-    s.frequency_penalty = f32_of(&o, "frequency_penalty")?;
-    s.repeat_penalty = match f32_of(&o, "repeat_penalty")? {
+    s.presence_penalty = f32_of(o, "presence_penalty")?;
+    s.frequency_penalty = f32_of(o, "frequency_penalty")?;
+    s.repeat_penalty = match f32_of(o, "repeat_penalty")? {
         Some(p) => Some(p),
-        None => f32_of(&o, "repetition_penalty")?,
+        None => f32_of(o, "repetition_penalty")?,
     };
     req.seed = match o.get("seed") {
         None | Some(Value::Null) => None,
         Some(v) => Some(v.as_u64().ok_or_else(|| bad("`seed` must be a whole number"))?),
     };
-    req.response_format = response_format(o.get("response_format"))?;
-    req.tools = tools(o.get("tools"))?;
+    Ok(())
+}
+
+/// A `/v1/completions` body: a raw-prompt request and whether to stream. `prompt` is a string
+/// (or an array of one string); sampling parameters and `seed` map as for chat. `n`, `best_of`
+/// above 1, `echo`, `suffix` and `logprobs` are refused; other parameters are ignored.
+pub fn completion(body: Value) -> Result<(Request, bool), BadRequest> {
+    let o = object(body)?;
+    let prompt = match o.get("prompt") {
+        Some(Value::String(p)) => p.clone(),
+        Some(Value::Array(a)) if a.len() == 1 && a[0].is_string() => a[0].as_str().unwrap_or_default().to_string(),
+        Some(Value::Array(a)) if a.iter().all(Value::is_string) => return Err(bad("one prompt per request")),
+        _ => return Err(bad("`prompt` must be a string")),
+    };
+    for key in ["n", "best_of"] {
+        if u32_of(&o, key)?.is_some_and(|n| n > 1) {
+            return Err(bad(format!("`{key}` above 1 is not supported")));
+        }
+    }
+    if o.get("echo").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(bad("`echo` is not supported"));
+    }
+    for key in ["suffix", "logprobs"] {
+        if o.get(key).is_some_and(|v| !v.is_null() && *v != Value::Bool(false)) {
+            return Err(bad(format!("`{key}` is not supported")));
+        }
+    }
+    let stream = o.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let mut req = Request::prompt(prompt);
+    sampling_and_seed(&o, &mut req)?;
     Ok((req, stream))
 }
 
@@ -226,6 +262,30 @@ mod tests {
         assert!(chat(json!({"messages": [{"role": "user", "content": "x"}], "temperature": "hot"})).is_err());
         assert!(chat(json!([1])).is_err());
         assert!(embed(json!({"input": "x", "encoding_format": "base64"})).is_err());
+        assert!(completion(json!({"prompt": ["a", "b"]})).is_err());
+        assert!(completion(json!({"prompt": "a", "n": 2})).is_err());
+        assert!(completion(json!({"prompt": "a", "echo": true})).is_err());
+        assert!(completion(json!({"prompt": "a", "logprobs": 2})).is_err());
+        assert!(completion(json!({"prompt": 3})).is_err());
         assert_eq!(embed(json!({"input": ["a", "b"], "model": "e"})).unwrap().inputs, ["a", "b"]);
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn maps_a_prompt_and_its_sampling() {
+        let (req, stream) = completion(
+            json!({"model": "base", "prompt": ["Once"], "max_tokens": 5, "temperature": 0.5, "stop": ["\n"], "seed": 3, "n": 1, "logprobs": null}),
+        )
+        .unwrap();
+        assert!(!stream);
+        assert_eq!((req.raw_prompt(), req.model.as_deref()), (Some("Once"), Some("base")));
+        assert_eq!((req.sampling.max_tokens, req.sampling.temperature, req.seed), (Some(5), Some(0.5), Some(3)));
+        assert_eq!(req.sampling.stop, ["\n"]);
+        assert!(req.tools.is_empty());
     }
 }

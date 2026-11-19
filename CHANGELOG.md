@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/v1/completions` works: the prompt goes to the pool as an infer/2 raw prompt (`weirdnet-agent` 0.4.1), whole or streamed (`text_completion` chunks). Sampling parameters and `seed` map as for chat; `n`/`best_of` above 1, `echo`, `suffix` and `logprobs` are refused with 400; a node that can't take raw prompts answers 501.
+- Streamed answers carry `x-weirdnet-cache: hit` too: after a node accepts, headers wait up to `EARLY_META_WAIT` (1.5 s) for its early metadata or first output. Nodes before 0.4.1 report hits only at the end, in the final chunk's `weirdnet.cache_hit` and the metric.
+- `/v1/embeddings` reports the node's real `usage.prompt_tokens` (0 from nodes before 0.4.1).
+
+### Changed
+
+- Needs `weirdnet-agent` 0.4.1.
+- A cache hit found only at the end of a stream is counted once in `weirdnet_bridge_cache_hits_total`.
+
 ## [0.1.0] - 2026-11-19
 
 ### Added

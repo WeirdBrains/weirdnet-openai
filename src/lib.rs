@@ -1,8 +1,8 @@
 //! A loopback-only OpenAI-compatible bridge over a `weirdnet-agent` [`Pool`].
 //!
 //! Local tools that speak the OpenAI API (editors, notebooks, `curl`) reach the user's
-//! inference nodes through it: `/v1/chat/completions` (streaming or not), `/v1/models` (the pool
-//! catalog) and `/v1/embeddings`, plus Prometheus `/metrics`.
+//! inference nodes through it: `/v1/chat/completions` and `/v1/completions` (streaming or not),
+//! `/v1/models` (the pool catalog) and `/v1/embeddings`, plus Prometheus `/metrics`.
 //!
 //! It binds `127.0.0.1` only, checks the `Host` header against its own address (DNS rebinding),
 //! requires a bearer token of at least 16 characters (compared in constant time), and sends no
@@ -10,7 +10,9 @@
 //! `x-weirdnet-cache: hit` and `x-weirdnet-standin` when the pool says so; a request with
 //! `x-wait: 1` waits for its model instead of a stand-in.
 //!
-//! `/v1/completions` answers 501: infer/2 carries chat messages, not raw prompts.
+//! `/v1/completions` sends the prompt as an infer/2 raw prompt (`weirdnet-agent` 0.4.1); nodes
+//! that can't take one answer 501. A streamed answer waits up to [`EARLY_META_WAIT`] after a node
+//! accepts it for early metadata, so `x-weirdnet-cache: hit` is sent on streams too.
 
 pub mod request;
 
@@ -19,7 +21,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -35,6 +37,10 @@ use weirdnet_agent::CancelToken;
 use weirdnet_agent::remote::RemoteError;
 use weirdnet_agent::remote::infer::v2::{Meta, Usage};
 use weirdnet_agent::remote::pool::{Answer, EventSink, Interrupted, NoEvents, Pool, PoolEvent};
+
+/// How long a streamed answer's headers wait, after a node accepted it, for early metadata (a
+/// cache hit) or the first output. A node that sends neither in time gets headers without it.
+pub const EARLY_META_WAIT: Duration = Duration::from_millis(1500);
 
 /// Where the bridge listens and the token it requires.
 #[derive(Clone)]
@@ -247,9 +253,18 @@ fn weirdnet_json(meta: &Meta, standin: Option<&str>) -> Value {
     json!({"standin": standin.or(meta.standin.as_deref()), "cache_hit": meta.cache_hit, "served_by": meta.served_by})
 }
 
-/// `/v1/completions`: infer/2 has no raw-prompt input.
-async fn completions() -> Response {
-    error(StatusCode::NOT_IMPLEMENTED, "unsupported", "text completions are not available over Weirdnet inference; use /v1/chat/completions")
+/// `/v1/completions`: a raw prompt over infer/2.
+async fn completions(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Response {
+    let body = match json_body(&body) {
+        Ok(v) => v,
+        Err(e) => return error(StatusCode::BAD_REQUEST, "bad_request", &e),
+    };
+    let (mut req, stream) = match request::completion(body) {
+        Ok(r) => r,
+        Err(e) => return error(StatusCode::BAD_REQUEST, "bad_request", &e.0),
+    };
+    req.wait_for_model |= wants_wait(&h);
+    answer(st, req, stream, Shape::Text).await
 }
 
 async fn embeddings(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
@@ -265,8 +280,9 @@ async fn embeddings(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
         Ok(e) => {
             let headers = reply_headers(&st, &e.model, e.meta.cache_hit, e.meta.standin.as_deref());
             let data: Vec<Value> = e.vectors.iter().enumerate().map(|(i, v)| json!({"object": "embedding", "index": i, "embedding": v})).collect();
-            // The pool does not report embedding token counts.
-            let body = json!({"object": "list", "model": e.model, "data": data, "usage": {"prompt_tokens": 0, "total_tokens": 0}});
+            // Nodes before weirdnet-agent 0.4.1 report no count: 0.
+            let tokens = e.usage.map(|u| u.prompt_tokens).unwrap_or(0);
+            let body = json!({"object": "list", "model": e.model, "data": data, "usage": {"prompt_tokens": tokens, "total_tokens": tokens}});
             (headers, axum::Json(body)).into_response()
         }
         Err(e) => pool_error(&st, &e),
@@ -310,7 +326,35 @@ async fn chat(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Res
         Err(e) => return error(StatusCode::BAD_REQUEST, "bad_request", &e.0),
     };
     req.wait_for_model |= wants_wait(&h);
-    let id = format!("chatcmpl-{}", random_hex(12));
+    answer(st, req, stream, Shape::Chat).await
+}
+
+/// Which OpenAI answer shape: chat completions or text completions.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    Chat,
+    Text,
+}
+
+impl Shape {
+    fn id(self) -> String {
+        match self {
+            Shape::Chat => format!("chatcmpl-{}", random_hex(12)),
+            Shape::Text => format!("cmpl-{}", random_hex(12)),
+        }
+    }
+
+    fn whole(self, id: &str, created: u64, a: &Answer) -> Value {
+        match self {
+            Shape::Chat => completion(id, created, a),
+            Shape::Text => text_completion(id, created, a),
+        }
+    }
+}
+
+/// Runs `req` on the pool and answers in `shape`, whole or streamed.
+async fn answer(st: Arc<AppState>, req: weirdnet_agent::remote::infer::v2::Request, stream: bool, shape: Shape) -> Response {
+    let id = shape.id();
     let created = now_secs();
     let cancel = CancelToken::new();
     if !stream {
@@ -320,7 +364,7 @@ async fn chat(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Res
         return match answer {
             Ok(a) => {
                 let headers = reply_headers(&st, &a.model, a.meta.cache_hit, a.meta.standin.as_deref());
-                let mut v = completion(&id, created, &a);
+                let mut v = shape.whole(&id, created, &a);
                 v["weirdnet"] = weirdnet_json(&a.meta, None);
                 (headers, axum::Json(v)).into_response()
             }
@@ -329,7 +373,8 @@ async fn chat(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Res
     }
 
     // Streaming: run the pool request in a task; answer once a node accepted it (so failures
-    // before that are proper HTTP errors and `x-weirdnet-model` is known).
+    // before that are proper HTTP errors and `x-weirdnet-model` is known), and the node sent
+    // early metadata or its first output, or EARLY_META_WAIT passed.
     let requested = req.model.clone();
     let (tx, mut rx) = mpsc::unbounded_channel();
     let pool = st.pool.clone();
@@ -341,6 +386,7 @@ async fn chat(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Res
     });
     let guard = CancelOnDrop(cancel);
     let mut pending = Vec::new();
+    let mut ended = false;
     let model = loop {
         match rx.recv().await {
             Some(Step::Event(PoolEvent::Accepted { model, .. })) => break model,
@@ -349,6 +395,7 @@ async fn chat(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Res
                 Ok(a) => {
                     let model = a.model.clone();
                     pending.push(Step::End(Box::new(Ok(a))));
+                    ended = true;
                     break model;
                 }
                 Err(i) => return pool_error(&st, &i.error),
@@ -356,12 +403,55 @@ async fn chat(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Res
             None => return pool_error(&st, &RemoteError::Closed),
         }
     };
-    let standin = requested.as_deref().filter(|r| *r != model).map(|_| model.clone());
-    let headers = reply_headers(&st, &model, false, standin.as_deref());
+    let mut early = Meta::default();
+    if ended {
+        if let Some(Step::End(r)) = pending.last()
+            && let Ok(a) = r.as_ref()
+        {
+            early = a.meta.clone();
+        }
+    } else {
+        let deadline = tokio::time::Instant::now() + EARLY_META_WAIT;
+        loop {
+            let step = match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Err(_) | Ok(None) => break,
+                Ok(Some(s)) => s,
+            };
+            match step {
+                Step::Event(PoolEvent::Meta(m)) => {
+                    early = m;
+                    break;
+                }
+                Step::Event(ev @ (PoolEvent::Text(_) | PoolEvent::Reasoning(_) | PoolEvent::ToolCall(_))) => {
+                    pending.push(Step::Event(ev));
+                    break;
+                }
+                Step::End(r) => {
+                    if let Ok(a) = r.as_ref() {
+                        early = a.meta.clone();
+                    }
+                    pending.push(Step::End(r));
+                    break;
+                }
+                other => pending.push(other),
+            }
+        }
+    }
+    let standin = requested.as_deref().filter(|r| *r != model).map(|_| model.clone()).or_else(|| early.standin.clone());
+    let headers = reply_headers(&st, &model, early.cache_hit, standin.as_deref());
+    let counted = early.cache_hit;
     let chunk = {
         let (id, model) = (id.clone(), model.clone());
         move |delta: Value, finish: Option<&str>, extra: Option<(Value, Value)>| -> Result<SseEvent, Infallible> {
-            let mut v = json!({"id": id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]});
+            let mut v = match shape {
+                Shape::Chat => {
+                    json!({"id": id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+                }
+                Shape::Text => {
+                    let text = delta.get("content").and_then(Value::as_str).unwrap_or("");
+                    json!({"id": id, "object": "text_completion", "created": created, "model": model, "choices": [{"index": 0, "text": text, "logprobs": null, "finish_reason": finish}]})
+                }
+            };
             if let Some((usage, weirdnet)) = extra {
                 v["usage"] = usage;
                 v["weirdnet"] = weirdnet;
@@ -374,7 +464,9 @@ async fn chat(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Res
         let _guard = guard;
         let mut tool_index = 0usize;
         let mut usage = None;
-        out(chunk(json!({"role": "assistant", "content": ""}), None, None));
+        if shape == Shape::Chat {
+            out(chunk(json!({"role": "assistant", "content": ""}), None, None));
+        }
         let mut steps = pending.into_iter();
         loop {
             let step = match steps.next() {
@@ -386,8 +478,8 @@ async fn chat(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Res
             };
             match step {
                 Step::Event(PoolEvent::Text(t)) => out(chunk(json!({"content": t}), None, None)),
-                Step::Event(PoolEvent::Reasoning(t)) => out(chunk(json!({"reasoning_content": t}), None, None)),
-                Step::Event(PoolEvent::ToolCall(call)) => {
+                Step::Event(PoolEvent::Reasoning(t)) if shape == Shape::Chat => out(chunk(json!({"reasoning_content": t}), None, None)),
+                Step::Event(PoolEvent::ToolCall(call)) if shape == Shape::Chat => {
                     let call = json!({"index": tool_index, "id": call.id, "type": "function", "function": {"name": call.name, "arguments": call.arguments.to_string()}});
                     tool_index += 1;
                     out(chunk(json!({"tool_calls": [call]}), None, None));
@@ -397,7 +489,7 @@ async fn chat(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Res
                 Step::End(r) => {
                     match *r {
                         Ok(a) => {
-                            if a.meta.cache_hit {
+                            if a.meta.cache_hit && !counted {
                                 st2.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
                             }
                             let finish = a.finish_reason.as_deref().unwrap_or("stop");
@@ -460,6 +552,17 @@ fn completion(id: &str, created: u64, a: &Answer) -> Value {
         "created": created,
         "model": a.model,
         "choices": [{"index": 0, "message": message, "finish_reason": a.finish_reason.as_deref().unwrap_or("stop")}],
+        "usage": usage_json(a.usage),
+    })
+}
+
+fn text_completion(id: &str, created: u64, a: &Answer) -> Value {
+    json!({
+        "id": id,
+        "object": "text_completion",
+        "created": created,
+        "model": a.model,
+        "choices": [{"index": 0, "text": a.text, "logprobs": null, "finish_reason": a.finish_reason.as_deref().unwrap_or("stop")}],
         "usage": usage_json(a.usage),
     })
 }

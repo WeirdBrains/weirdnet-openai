@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use weirdnet_agent::remote::catalog::{self, CatalogFeed, CatalogModel, ModelState, Purpose};
-use weirdnet_agent::remote::infer::v2::{self, EmbedBackend, Finish, InferBackend, Output, Request, Usage};
+use weirdnet_agent::remote::infer::v2::{self, EmbedBackend, Finish, InferBackend, Meta, Output, Request, Usage};
 use weirdnet_agent::remote::infer::{Admission, InferHost};
 use weirdnet_agent::remote::pool::Pool;
 use weirdnet_agent::remote::{Caller, MemoryDialer, RemoteError};
@@ -16,7 +16,9 @@ use weirdnet_openai::{Bridge, BridgeOptions, new_token};
 const TOKEN: &str = "0123456789abcdef0123";
 
 /// "big" is cold: a stand-in ("small") answers unless the request waits; "slow" streams until
-/// cancelled; "cached" is a cache hit; with tools, it calls the first one.
+/// cancelled; "cached" is a cache hit it reports early, "late-cached" one it reports only at the
+/// end (a node before 0.4.1); "chat-only" refuses raw prompts; with tools, it calls the first one;
+/// a raw prompt is continued with " upon a time".
 struct Fake {
     model: String,
     cancelled: Arc<Mutex<u32>>,
@@ -41,6 +43,20 @@ impl InferBackend for Fake {
                 }
             }
         }
+        if let Some(prompt) = request.raw_prompt() {
+            if self.model == "chat-only" {
+                return Err(RemoteError::Unsupported { message: "this backend takes messages, not a raw prompt".into() });
+            }
+            assert_eq!(prompt, "Once");
+            out.text(" upon");
+            out.text(" a time");
+            return Ok(Finish::new("length").with_usage(Usage::new(1, 3)));
+        }
+        if self.model == "cached" {
+            let mut meta = Meta::default();
+            meta.cache_hit = true;
+            out.meta(meta);
+        }
         if let Some(tool) = request.tools.first() {
             out.tool_call(ToolCall { id: "call_1".into(), name: tool.name.clone(), arguments: json!({"q": 1}) });
             return Ok(Finish::new("tool_calls").with_usage(Usage::new(3, 1)));
@@ -52,7 +68,7 @@ impl InferBackend for Fake {
         if self.model == "small" && request.model.as_deref() == Some("big") {
             f.meta.standin = Some("small".into());
         }
-        f.meta.cache_hit = self.model == "cached";
+        f.meta.cache_hit = self.model == "cached" || self.model == "late-cached";
         Ok(f)
     }
 }
@@ -64,6 +80,10 @@ impl EmbedBackend for Fake {
     }
     async fn embed(&self, input: &str, _cancel: &CancelToken) -> Result<Vec<f32>, RemoteError> {
         Ok(vec![input.len() as f32, 1.0])
+    }
+    /// One token per character.
+    async fn embed_counted(&self, input: &str, cancel: &CancelToken) -> Result<(Vec<f32>, Option<u64>), RemoteError> {
+        Ok((self.embed(input, cancel).await?, Some(input.len() as u64)))
     }
 }
 
@@ -85,6 +105,8 @@ impl InferHost for Host {
             Some("big") => "big",
             Some("slow") => "slow",
             Some("cached") => "cached",
+            Some("late-cached") => "late-cached",
+            Some("chat-only") => "chat-only",
             Some(other) => return Err(RemoteError::unavailable(format!("unknown model `{other}`"))),
         };
         Ok(Arc::new(Fake { model: model.into(), cancelled: self.cancelled.clone() }))
@@ -205,9 +227,24 @@ async fn standin_cache_and_x_wait_headers() {
     let r = c.post(&url).bearer_auth(TOKEN).json(&cached).send().await.unwrap();
     assert_eq!(r.headers()["x-weirdnet-cache"], "hit");
 
+    // Streamed: the early Meta frame puts the header on the stream too.
+    let mut cached_stream = cached.clone();
+    cached_stream["stream"] = true.into();
+    let r = c.post(&url).bearer_auth(TOKEN).json(&cached_stream).send().await.unwrap();
+    assert_eq!(r.headers()["x-weirdnet-cache"], "hit");
+    let text = r.text().await.unwrap();
+    assert!(text.contains("\"cache_hit\":true") && text.contains("\"content\":\"lo\""), "{text}");
+
+    // A node that reports the hit only at the end: no header, but the final chunk and the
+    // metric have it.
+    let late = json!({"model": "late-cached", "stream": true, "messages": [{"role": "user", "content": "hi"}]});
+    let r = c.post(&url).bearer_auth(TOKEN).json(&late).send().await.unwrap();
+    assert!(r.headers().get("x-weirdnet-cache").is_none());
+    assert!(r.text().await.unwrap().contains("\"cache_hit\":true"));
+
     let m = c.get(format!("http://{addr}/metrics")).bearer_auth(TOKEN).send().await.unwrap().text().await.unwrap();
     assert!(m.contains("weirdnet_bridge_standin_total 2"), "{m}");
-    assert!(m.contains("weirdnet_bridge_cache_hits_total 1"), "{m}");
+    assert!(m.contains("weirdnet_bridge_cache_hits_total 3"), "{m}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -229,7 +266,7 @@ async fn a_dropped_stream_cancels_the_request() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn embeddings_and_no_completions() {
+async fn embeddings_with_usage() {
     let (addr, _) = start().await;
     let c = reqwest::Client::new();
     let v: Value = c
@@ -245,6 +282,7 @@ async fn embeddings_and_no_completions() {
     assert_eq!(v["object"], "list");
     assert_eq!(v["data"][1]["index"], 1);
     assert_eq!(v["data"][1]["embedding"][0], 4.0);
+    assert_eq!(v["usage"], json!({"prompt_tokens": 6, "total_tokens": 6}));
     let r = c
         .post(format!("http://{addr}/v1/embeddings"))
         .bearer_auth(TOKEN)
@@ -253,6 +291,36 @@ async fn embeddings_and_no_completions() {
         .await
         .unwrap();
     assert_eq!(r.status(), 400);
-    let r = c.post(format!("http://{addr}/v1/completions")).bearer_auth(TOKEN).json(&json!({"prompt": "Once"})).send().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn text_completions_whole_and_streamed() {
+    let (addr, _) = start().await;
+    let c = reqwest::Client::new();
+    let url = format!("http://{addr}/v1/completions");
+    let r = c.post(&url).bearer_auth(TOKEN).json(&json!({"prompt": "Once", "max_tokens": 3})).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["x-weirdnet-model"], "m");
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["object"], "text_completion");
+    assert!(v["id"].as_str().unwrap().starts_with("cmpl-"));
+    assert_eq!(v["choices"][0]["text"], " upon a time");
+    assert_eq!(v["choices"][0]["finish_reason"], "length");
+    assert_eq!(v["usage"]["total_tokens"], 4);
+
+    let r = c.post(&url).bearer_auth(TOKEN).json(&json!({"prompt": ["Once"], "stream": true})).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let text = r.text().await.unwrap();
+    let chunks: Vec<Value> =
+        text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
+    let joined: String = chunks.iter().filter_map(|c| c["choices"][0]["text"].as_str()).collect();
+    assert_eq!(joined, " upon a time");
+    assert!(chunks.iter().all(|c| c["object"] == "text_completion"));
+    assert_eq!(chunks.last().unwrap()["choices"][0]["finish_reason"], "length");
+    assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+
+    let r = c.post(&url).bearer_auth(TOKEN).json(&json!({"prompt": "Once", "model": "chat-only"})).send().await.unwrap();
     assert_eq!(r.status(), 501);
+    let r = c.post(&url).bearer_auth(TOKEN).json(&json!({"prompt": "Once", "n": 2})).send().await.unwrap();
+    assert_eq!(r.status(), 400);
 }
