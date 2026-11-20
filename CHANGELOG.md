@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Chat messages carry `image_url` (data URLs) and `input_audio` parts to the pool instead of answering 400; the pool routes them to a model that takes them, or the answer is a 400 that says none does.
+- `/v1/models` lists `weirdnet.vision` and `weirdnet.audio`.
+
+### Changed
+
+- Needs `weirdnet-agent` 0.5 (content parts). Request bodies may be up to 32 MiB (was 16 MiB).
+
 ## [0.1.2] - 2026-11-19
 
 ### Added

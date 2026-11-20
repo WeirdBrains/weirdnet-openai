@@ -28,3 +28,7 @@ tokio = { version = "1", features = ["net", "sync", "rt", "rt-multi-thread", "ma
 
 [package.metadata.docs.rs]
 all-features = true
+
+# Content parts (weirdnet-agent main, unreleased); removed when weirdnet-agent 0.5.0 is on crates.io.
+[patch.crates-io]
+weirdnet-agent = { git = "https://github.com/WeirdBrains/weirdnet-agent", rev = "fd7d9972c17368c49c9bc27f54fb173337d4fea8" }
