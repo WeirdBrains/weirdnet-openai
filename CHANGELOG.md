@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-20
+
 ### Added
 
 - Chat messages carry `image_url` (data URLs) and `input_audio` parts to the pool instead of answering 400; the pool routes them to a model that takes them, or the answer is a 400 that says none does.
