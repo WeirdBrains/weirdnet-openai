@@ -534,7 +534,8 @@ where
 }
 
 fn completion(id: &str, created: u64, a: &Answer) -> Value {
-    let mut message = json!({"role": "assistant", "content": a.text});
+    // A continued answer (`continue_final_message`) returns only the new text, as vLLM does.
+    let mut message = json!({"role": "assistant", "content": a.continuation()});
     if !a.reasoning.is_empty() {
         message["reasoning_content"] = a.reasoning.clone().into();
     }

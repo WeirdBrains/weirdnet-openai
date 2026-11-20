@@ -30,6 +30,11 @@ impl InferBackend for Fake {
         self.model.clone()
     }
 
+    /// Everything but "chat-only" continues an assistant prefix.
+    fn resumes(&self) -> bool {
+        self.model != "chat-only"
+    }
+
     async fn infer(&self, request: &Request, out: &Output, cancel: &CancelToken) -> Result<Finish, RemoteError> {
         if self.model == "slow" {
             loop {
@@ -51,6 +56,11 @@ impl InferBackend for Fake {
             out.text(" upon");
             out.text(" a time");
             return Ok(Finish::new("length").with_usage(Usage::new(1, 3)));
+        }
+        if let Some(p) = &request.assistant_prefix {
+            assert_eq!(p.text, "Hel");
+            out.text("lo there");
+            return Ok(Finish::new("stop").with_usage(Usage::new(3, 2)));
         }
         if self.model == "cached" {
             let mut meta = Meta::default();
@@ -332,4 +342,29 @@ async fn text_completions_whole_and_streamed() {
     assert_eq!(r.status(), 501);
     let r = c.post(&url).bearer_auth(TOKEN).json(&json!({"prompt": "Once", "n": 2})).send().await.unwrap();
     assert_eq!(r.status(), 400);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_final_message_returns_only_the_continuation() {
+    let (addr, _) = start().await;
+    let c = reqwest::Client::new();
+    let url = format!("http://{addr}/v1/chat/completions");
+    let msgs = json!([{"role": "user", "content": "hi"}, {"role": "assistant", "content": "Hel"}]);
+    let body = json!({"messages": msgs, "continue_final_message": true, "add_generation_prompt": false});
+    let v: Value = c.post(&url).bearer_auth(TOKEN).json(&body).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v["choices"][0]["message"]["content"], "lo there");
+
+    let mut streamed = body.clone();
+    streamed["stream"] = true.into();
+    let text = c.post(&url).bearer_auth(TOKEN).json(&streamed).send().await.unwrap().text().await.unwrap();
+    assert!(text.contains("\"content\":\"lo there\""), "{text}");
+    assert!(!text.contains("\"content\":\"Hel"), "{text}");
+
+    // A node that cannot continue: 501, as for anything unsupported.
+    let mut chat_only = body.clone();
+    chat_only["model"] = "chat-only".into();
+    assert_eq!(c.post(&url).bearer_auth(TOKEN).json(&chat_only).send().await.unwrap().status(), 501);
+    let mut bad = body;
+    bad["messages"] = json!([{"role": "user", "content": "hi"}]);
+    assert_eq!(c.post(&url).bearer_auth(TOKEN).json(&bad).send().await.unwrap().status(), 400);
 }

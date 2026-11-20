@@ -2,7 +2,7 @@
 
 use serde_json::{Map, Value};
 use weirdnet_agent::remote::infer::v2::{EmbedRequest, Request, ResponseFormat};
-use weirdnet_agent::{Message, ToolCall, ToolSpec};
+use weirdnet_agent::{Message, Role, ToolCall, ToolSpec};
 
 /// A request the bridge cannot take; answered with 400.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,8 +127,18 @@ fn model(o: &Map<String, Value>) -> Result<Option<String>, BadRequest> {
     }
 }
 
+/// A boolean parameter, false when absent.
+fn flag(o: &Map<String, Value>, key: &str) -> Result<bool, BadRequest> {
+    match o.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(bad(format!("`{key}` must be true or false"))),
+    }
+}
+
 /// A `/v1/chat/completions` body: the request and whether to stream. Known sampling parameters,
-/// `seed`, `response_format` and `tools` are mapped; other parameters are ignored.
+/// `seed`, `response_format` and `tools` are mapped, and `continue_final_message` (vLLM) continues
+/// the last assistant message; other parameters are ignored.
 pub fn chat(body: Value) -> Result<(Request, bool), BadRequest> {
     let o = object(body)?;
     let messages = match o.get("messages") {
@@ -136,7 +146,19 @@ pub fn chat(body: Value) -> Result<(Request, bool), BadRequest> {
         _ => return Err(bad("`messages` must be a non-empty array")),
     };
     let stream = o.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let continues = flag(&o, "continue_final_message")?;
+    if continues {
+        if flag(&o, "add_generation_prompt")? {
+            return Err(bad("`continue_final_message` and `add_generation_prompt` cannot both be true"));
+        }
+        if !messages.last().is_some_and(|m| m.role == Role::Assistant && m.tool_calls.is_empty()) {
+            return Err(bad("`continue_final_message` needs the last message to be an assistant message without tool calls"));
+        }
+    }
     let mut req = Request::messages(messages);
+    if continues {
+        req = req.continuing();
+    }
     sampling_and_seed(&o, &mut req)?;
     req.response_format = response_format(o.get("response_format"))?;
     req.tools = tools(o.get("tools"))?;
@@ -268,6 +290,20 @@ mod tests {
         assert!(completion(json!({"prompt": "a", "logprobs": 2})).is_err());
         assert!(completion(json!({"prompt": 3})).is_err());
         assert_eq!(embed(json!({"input": ["a", "b"], "model": "e"})).unwrap().inputs, ["a", "b"]);
+    }
+
+    #[test]
+    fn continue_final_message_moves_the_last_assistant_message_into_the_prefix() {
+        let msgs = json!([{"role": "user", "content": "q"}, {"role": "assistant", "content": "Hel"}]);
+        let (req, _) = chat(json!({"messages": msgs, "continue_final_message": true, "add_generation_prompt": false})).unwrap();
+        assert_eq!(req.inline_messages().unwrap().len(), 1);
+        assert_eq!(req.assistant_prefix.as_ref().map(|p| p.text.as_str()), Some("Hel"));
+        // Without the flag a trailing assistant message stays a message.
+        let (req, _) = chat(json!({"messages": msgs})).unwrap();
+        assert_eq!((req.inline_messages().unwrap().len(), req.assistant_prefix.is_none()), (2, true));
+        assert!(chat(json!({"messages": msgs, "continue_final_message": true, "add_generation_prompt": true})).is_err());
+        assert!(chat(json!({"messages": [{"role": "user", "content": "q"}], "continue_final_message": true})).is_err());
+        assert!(chat(json!({"messages": msgs, "continue_final_message": "yes"})).is_err());
     }
 }
 

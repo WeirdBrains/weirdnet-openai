@@ -37,5 +37,7 @@ bridge.serve(Arc::new(pool), shutdown).await?;
 Requests map onto infer/2: messages (string content or text parts; other parts are refused
 with 400), `temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`/`max_completion_tokens`,
 `stop`, `presence_penalty`, `frequency_penalty`, `repeat_penalty`/`repetition_penalty`,
-`seed`, `response_format` (text, `json_object`, `json_schema`) and function `tools`. Other
+`seed`, `response_format` (text, `json_object`, `json_schema`) and function `tools`.
+`continue_final_message: true` (vLLM's parameter) continues the last assistant message: the
+reply holds only the new text, and a pool with no node that can continue answers 501. Other
 parameters are ignored. Dropping a response cancels the pool request.

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Chat `continue_final_message: true` (vLLM's parameter) continues the last assistant message through the pool (`weirdnet-agent` 0.4.2 `Request::continuing`). The reply, whole or streamed, holds only the new text; with no node that can continue it is a 501. With `add_generation_prompt: true`, or a last message that isn't a plain assistant message, it is a 400.
+
+### Changed
+
+- Depends on `weirdnet-agent` `"0.4.2"`.
+
 ## [0.1.1] - 2026-11-19
 
 ### Added
