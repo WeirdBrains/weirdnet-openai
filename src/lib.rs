@@ -10,11 +10,6 @@
 //! `x-weirdnet-cache: hit` and `x-weirdnet-standin` when the pool says so; a request with
 //! `x-wait: 1` waits for its model instead of a stand-in.
 //!
-//! Chat messages may carry image (`image_url`, a `data:image/...` URL) and audio (`input_audio`)
-//! parts. They go to the pool unchanged, which sends them only to a model whose catalog entry
-//! takes them; when none does the answer is 400. `/v1/models` lists `weirdnet.vision` and
-//! `weirdnet.audio` per model. Bodies may be up to 32 MiB.
-//!
 //! `/v1/completions` sends the prompt as an infer/2 raw prompt (`weirdnet-agent` 0.4.1); nodes
 //! that can't take one answer 501. A streamed answer waits up to [`EARLY_META_WAIT`] after a node
 //! accepts it for early metadata, so `x-weirdnet-cache: hit` is sent on streams too.
@@ -118,7 +113,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/v1/embeddings", post(embeddings))
         .route("/metrics", get(metrics))
         .fallback(not_found)
-        .layer(DefaultBodyLimit::max(32 << 20))
+        .layer(DefaultBodyLimit::max(16 << 20))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
 }
@@ -201,10 +196,7 @@ async fn models(State(st): State<Arc<AppState>>) -> Response {
                         "object": "model",
                         "created": 0,
                         "owned_by": "weirdnet",
-                        "weirdnet": {
-                            "state": m.state, "purpose": m.purpose, "replicas": m.replicas, "context": m.context, "revision": m.revision,
-                            "vision": m.inputs.vision, "audio": m.inputs.audio,
-                        },
+                        "weirdnet": {"state": m.state, "purpose": m.purpose, "replicas": m.replicas, "context": m.context, "revision": m.revision},
                     })
                 })
                 .collect();

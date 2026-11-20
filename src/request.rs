@@ -2,7 +2,7 @@
 
 use serde_json::{Map, Value};
 use weirdnet_agent::remote::infer::v2::{EmbedRequest, Request, ResponseFormat};
-use weirdnet_agent::{Content, ContentPart, Message, Role, ToolCall, ToolSpec};
+use weirdnet_agent::{Message, Role, ToolCall, ToolSpec};
 
 /// A request the bridge cannot take; answered with 400.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,41 +19,21 @@ fn object(body: Value) -> Result<Map<String, Value>, BadRequest> {
     }
 }
 
-/// One content part: `text`, `image_url` (a `data:image/...` URL, as an object or a bare string)
-/// or `input_audio` (`data` and `format`). Other types are refused.
-fn part(p: &Value) -> Result<ContentPart, BadRequest> {
-    match p["type"].as_str() {
-        Some("text") => Ok(ContentPart::text(p["text"].as_str().unwrap_or_default())),
-        Some("image_url") => {
-            let (url, detail) = match &p["image_url"] {
-                Value::String(u) => (u.as_str(), None),
-                o => (o["url"].as_str().ok_or_else(|| bad("image_url parts need `image_url.url`"))?, o["detail"].as_str()),
-            };
-            let mut part = ContentPart::image(url);
-            if let (ContentPart::ImageUrl { image_url }, Some(d)) = (&mut part, detail) {
-                image_url.detail = Some(d.to_string());
-            }
-            Ok(part)
-        }
-        Some("input_audio") => {
-            let a = &p["input_audio"];
-            Ok(ContentPart::audio(a["data"].as_str().unwrap_or_default(), a["format"].as_str().unwrap_or_default()))
-        }
-        Some(other) => Err(bad(format!("content parts of type `{other}` are not supported"))),
-        None => Err(bad("content parts need a `type`")),
-    }
-}
-
-/// Message content: a string, or parts. Text-only parts are joined into a string (the form every
-/// node reads); images and audio go through as parts, checked by [`Content::check`].
-fn content(v: Option<&Value>) -> Result<Content, BadRequest> {
+/// Message content: a string, or text parts joined. Other parts (images, audio) are refused.
+fn content(v: Option<&Value>) -> Result<String, BadRequest> {
     match v {
-        None | Some(Value::Null) => Ok(Content::default()),
-        Some(Value::String(s)) => Ok(s.clone().into()),
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(s)) => Ok(s.clone()),
         Some(Value::Array(parts)) => {
-            let c = Content::from(parts.iter().map(part).collect::<Result<Vec<_>, _>>()?).normalized();
-            c.check().map_err(bad)?;
-            Ok(c)
+            let mut out = String::new();
+            for p in parts {
+                match p["type"].as_str() {
+                    Some("text") => out.push_str(p["text"].as_str().unwrap_or_default()),
+                    Some(other) => return Err(bad(format!("content parts of type `{other}` are not supported"))),
+                    None => return Err(bad("content parts need a `type`")),
+                }
+            }
+            Ok(out)
         }
         Some(_) => Err(bad("`content` must be a string or an array of parts")),
     }
@@ -288,7 +268,7 @@ mod tests {
         assert_eq!(req.model.as_deref(), Some("m"));
         let Input::Messages(m) = &req.input else { panic!() };
         assert_eq!(m.iter().map(|m| m.role).collect::<Vec<_>>(), [Role::System, Role::User, Role::Assistant, Role::Tool]);
-        assert_eq!(m[1].content, "ab", "text-only parts become a plain string");
+        assert_eq!(m[1].content, "ab");
         assert_eq!(m[2].tool_calls[0].arguments, json!({"x": 1}));
         assert_eq!(m[3].tool_call_id.as_deref(), Some("c1"));
         assert_eq!((req.sampling.temperature, req.sampling.max_tokens, req.sampling.repeat_penalty), (Some(0.0), Some(9), Some(1.1)));
@@ -298,31 +278,9 @@ mod tests {
     }
 
     #[test]
-    fn images_and_audio_pass_through_as_parts() {
-        let png = "data:image/png;base64,iVBORw0KGgo=";
-        let body = json!({"messages": [{"role": "user", "content": [
-            {"type": "text", "text": "what is this?"},
-            {"type": "image_url", "image_url": {"url": png, "detail": "low"}},
-            {"type": "image_url", "image_url": png},
-            {"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}}
-        ]}]});
-        let (r, _) = chat(body).unwrap();
-        let m = &r.inline_messages().unwrap()[0];
-        let Content::Parts(parts) = &m.content else { panic!("parts expected") };
-        assert_eq!(parts.len(), 4);
-        assert!(matches!(&parts[1], ContentPart::ImageUrl { image_url } if image_url.url == png && image_url.detail.as_deref() == Some("low")));
-        assert_eq!(parts[2], ContentPart::image(png));
-        assert_eq!(parts[3], ContentPart::audio("UklGRg==", "wav"));
-        assert!(r.needs().vision && r.needs().audio);
-    }
-
-    #[test]
     fn refuses_what_it_cannot_carry() {
         assert!(chat(json!({"messages": []})).is_err());
         assert!(chat(json!({"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {}}]}]})).is_err());
-        let remote = json!({"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}]}]});
-        assert!(chat(remote).unwrap_err().0.contains("data:image"));
-        assert!(chat(json!({"messages": [{"role": "user", "content": [{"type": "file", "file": {}}]}]})).unwrap_err().0.contains("`file`"));
         assert!(chat(json!({"messages": [{"role": "user", "content": "x"}], "temperature": "hot"})).is_err());
         assert!(chat(json!([1])).is_err());
         assert!(embed(json!({"input": "x", "encoding_format": "base64"})).is_err());
