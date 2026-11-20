@@ -10,7 +10,7 @@ use weirdnet_agent::remote::infer::v2::{self, EmbedBackend, Finish, InferBackend
 use weirdnet_agent::remote::infer::{Admission, InferHost};
 use weirdnet_agent::remote::pool::Pool;
 use weirdnet_agent::remote::{Caller, MemoryDialer, RemoteError};
-use weirdnet_agent::{CancelToken, ModelBackend, ToolCall};
+use weirdnet_agent::{CancelToken, ContentPart, Modalities, ModelBackend, ToolCall};
 use weirdnet_openai::{Bridge, BridgeOptions, new_token};
 
 const TOKEN: &str = "0123456789abcdef0123";
@@ -56,6 +56,12 @@ impl InferBackend for Fake {
             out.text(" upon");
             out.text(" a time");
             return Ok(Finish::new("length").with_usage(Usage::new(1, 3)));
+        }
+        if self.model == "vision" {
+            let m = &request.inline_messages().unwrap()[0];
+            let images = m.content.parts().iter().filter(|p| matches!(p, ContentPart::ImageUrl { .. })).count();
+            out.text(format!("{} [{images} image(s)]", m.text()));
+            return Ok(Finish::new("stop").with_usage(Usage::new(5, 3)));
         }
         if let Some(p) = &request.assistant_prefix {
             assert_eq!(p.text, "Hel");
@@ -117,6 +123,7 @@ impl InferHost for Host {
             Some("cached") => "cached",
             Some("late-cached") => "late-cached",
             Some("chat-only") => "chat-only",
+            Some("vision") => "vision",
             Some(other) => return Err(RemoteError::unavailable(format!("unknown model `{other}`"))),
         };
         Ok(Arc::new(Fake { model: model.into(), cancelled: self.cancelled.clone() }))
@@ -133,7 +140,10 @@ async fn start() -> (std::net::SocketAddr, Arc<Mutex<u32>>) {
     let cancelled = Arc::new(Mutex::new(0));
     let host: Arc<dyn InferHost> = Arc::new(Host { cancelled: cancelled.clone() });
     let feed = CatalogFeed::new(Arc::new(|_: &Caller| Ok(())));
-    feed.publish(vec![CatalogModel::new("m", Purpose::Chat, ModelState::Warm).with_replicas(1)]);
+    feed.publish(vec![
+        CatalogModel::new("m", Purpose::Chat, ModelState::Warm).with_replicas(1),
+        CatalogModel::new("vision", Purpose::Chat, ModelState::Loadable).with_inputs(Modalities::VISION),
+    ]);
     let dialer = MemoryDialer::new();
     let admission = Admission::with_queue(4, 4);
     dialer.route("inference", move |ch, proto| {
@@ -211,7 +221,50 @@ async fn chat_non_streaming_and_streaming() {
     assert_eq!(r.status(), 404, "a stream that never started is a plain error");
     assert_eq!(c.post(&url).bearer_auth(TOKEN).body("{").send().await.unwrap().status(), 400);
     let img = json!([{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}]);
-    assert_eq!(c.post(&url).bearer_auth(TOKEN).json(&json!({"messages": img})).send().await.unwrap().status(), 400);
+    assert_eq!(c.post(&url).bearer_auth(TOKEN).json(&json!({"messages": img})).send().await.unwrap().status(), 400, "not a data URL");
+}
+
+const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+fn image_body(model: Option<&str>, images: usize, stream: bool) -> Value {
+    let mut parts = vec![json!({"type": "text", "text": "describe"})];
+    parts.extend((0..images).map(|_| json!({"type": "image_url", "image_url": {"url": PNG}})));
+    let mut b = json!({"messages": [{"role": "user", "content": parts}], "stream": stream});
+    if let Some(m) = model {
+        b["model"] = m.into();
+    }
+    b
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn images_reach_a_vision_model_and_never_a_text_only_one() {
+    let (addr, _) = start().await;
+    let c = reqwest::Client::new();
+    let url = format!("http://{addr}/v1/chat/completions");
+    for (model, images) in [(Some("vision"), 1), (None, 3)] {
+        let r = c.post(&url).bearer_auth(TOKEN).json(&image_body(model, images, false)).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.headers()["x-weirdnet-model"], "vision");
+        let v: Value = r.json().await.unwrap();
+        assert_eq!(v["choices"][0]["message"]["content"], format!("describe [{images} image(s)]"));
+    }
+    let text = c.post(&url).bearer_auth(TOKEN).json(&image_body(None, 2, true)).send().await.unwrap().text().await.unwrap();
+    assert!(text.contains("[2 image(s)]") && text.trim_end().ends_with("data: [DONE]"), "{text}");
+
+    let r = c.post(&url).bearer_auth(TOKEN).json(&image_body(Some("m"), 1, false)).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    let v: Value = r.json().await.unwrap();
+    assert!(v["error"]["message"].as_str().unwrap().contains("`m` does not take images"), "{v}");
+
+    let audio = json!({"messages": [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}}]}]});
+    let r = c.post(&url).bearer_auth(TOKEN).json(&audio).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    let v: Value = r.json().await.unwrap();
+    assert!(v["error"]["message"].as_str().unwrap().contains("no model in the pool takes audio"), "{v}");
+
+    let v: Value = c.get(format!("http://{addr}/v1/models")).bearer_auth(TOKEN).send().await.unwrap().json().await.unwrap();
+    assert_eq!((v["data"][1]["id"].as_str(), v["data"][1]["weirdnet"]["vision"].as_bool()), (Some("vision"), Some(true)));
+    assert_eq!(v["data"][0]["weirdnet"]["vision"], false);
 }
 
 #[tokio::test(flavor = "multi_thread")]
