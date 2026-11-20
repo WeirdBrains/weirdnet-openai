@@ -19,4 +19,6 @@ jobs:
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --all-features
       - run: cargo test --locked --no-default-features
-      - run: cargo package --locked
+      # While Cargo.toml patches in an unreleased Weirdnet crate from git, the packaged crate
+      # can't build against crates.io yet: check the package contents without the verify build.
+      - run: if grep -q '^\[patch' Cargo.toml; then cargo package --locked --no-verify; else cargo package --locked; fi
