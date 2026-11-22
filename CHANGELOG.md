@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-22
+
 ### Added
 
 - `"cache": false` or `x-weirdnet-cache: off` skips the nodes' answer cache; `"cache": "refresh"` or `x-weirdnet-cache: refresh` refreshes it (infer/2 `Request::cache`). The stricter of body and header wins; other values are a 400.
