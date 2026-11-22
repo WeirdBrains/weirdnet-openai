@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use weirdnet_agent::remote::catalog::{self, CatalogFeed, CatalogModel, ModelState, Purpose};
-use weirdnet_agent::remote::infer::v2::{self, EmbedBackend, Finish, InferBackend, Meta, Output, Request, Usage};
+use weirdnet_agent::remote::infer::v2::{self, CacheMode, EmbedBackend, Finish, InferBackend, Meta, Output, Request, Usage};
 use weirdnet_agent::remote::infer::{Admission, InferHost};
 use weirdnet_agent::remote::pool::Pool;
 use weirdnet_agent::remote::{Caller, MemoryDialer, RemoteError};
@@ -18,7 +18,8 @@ const TOKEN: &str = "0123456789abcdef0123";
 /// "big" is cold: a stand-in ("small") answers unless the request waits; "slow" streams until
 /// cancelled; "cached" is a cache hit it reports early, "late-cached" one it reports only at the
 /// end (a node before 0.4.1); "chat-only" refuses raw prompts; with tools, it calls the first one;
-/// a raw prompt is continued with " upon a time".
+/// a raw prompt is continued with " upon a time"; a request that skips or refreshes the answer
+/// cache gets its cache mode back as the answer.
 struct Fake {
     model: String,
     cancelled: Arc<Mutex<u32>>,
@@ -47,6 +48,10 @@ impl InferBackend for Fake {
                     _ = tokio::time::sleep(Duration::from_millis(20)) => {}
                 }
             }
+        }
+        if request.cache != CacheMode::Use {
+            out.text(format!("cache {:?}", request.cache));
+            return Ok(Finish::new("stop"));
         }
         if let Some(prompt) = request.raw_prompt() {
             if self.model == "chat-only" {
@@ -265,6 +270,50 @@ async fn images_reach_a_vision_model_and_never_a_text_only_one() {
     let v: Value = c.get(format!("http://{addr}/v1/models")).bearer_auth(TOKEN).send().await.unwrap().json().await.unwrap();
     assert_eq!((v["data"][1]["id"].as_str(), v["data"][1]["weirdnet"]["vision"].as_bool()), (Some("vision"), Some(true)));
     assert_eq!(v["data"][0]["weirdnet"]["vision"], false);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_parameter_and_header_reach_the_node() {
+    let (addr, _) = start().await;
+    let c = reqwest::Client::new();
+    let url = format!("http://{addr}/v1/chat/completions");
+    let ask = |body: Value, header: Option<&'static str>| {
+        let mut r = c.post(&url).bearer_auth(TOKEN).json(&body);
+        if let Some(h) = header {
+            r = r.header("x-weirdnet-cache", h);
+        }
+        r.send()
+    };
+    let body = |cache: Value| json!({"model": "m", "cache": cache, "messages": [{"role": "user", "content": "hi"}]});
+    let content = |v: Value| v["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string();
+
+    let v: Value = ask(body(json!(null)), None).await.unwrap().json().await.unwrap();
+    assert_eq!(content(v), "Hello");
+    let v: Value = ask(body(json!(false)), None).await.unwrap().json().await.unwrap();
+    assert_eq!(content(v), "cache Bypass");
+    let v: Value = ask(body(json!("refresh")), None).await.unwrap().json().await.unwrap();
+    assert_eq!(content(v), "cache Refresh");
+    let v: Value = ask(body(json!(null)), Some("off")).await.unwrap().json().await.unwrap();
+    assert_eq!(content(v), "cache Bypass");
+    let v: Value = ask(body(json!("refresh")), Some("off")).await.unwrap().json().await.unwrap();
+    assert_eq!(content(v), "cache Bypass", "the stricter of body and header wins");
+    let r = ask(body(json!(null)), Some("sometimes")).await.unwrap();
+    assert_eq!(r.status(), 400);
+    let r = ask(body(json!("sometimes")), None).await.unwrap();
+    assert_eq!(r.status(), 400);
+
+    let v: Value = c
+        .post(format!("http://{addr}/v1/completions"))
+        .bearer_auth(TOKEN)
+        .header("x-weirdnet-cache", "refresh")
+        .json(&json!({"model": "m", "prompt": "Once"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["choices"][0]["text"], "cache Refresh");
 }
 
 #[tokio::test(flavor = "multi_thread")]
