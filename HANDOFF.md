@@ -2,6 +2,16 @@
 
 Running log for [weirdnet-openai](https://github.com/WeirdBrains/weirdnet-openai), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-22: ready for 0.2.1 (merge of `cache-mode`)
+
+What changed: reverted the branch-only CI commit ([`54875cc`](https://github.com/WeirdBrains/weirdnet-openai/commit/54875ccf3b6360822c43d5e6eb87f4e85e311c82)) and moved to [weirdnet-agent 0.5.1](https://crates.io/crates/weirdnet-agent/0.5.1) from crates.io with no `[patch.crates-io]` ([`551d2c8`](https://github.com/WeirdBrains/weirdnet-openai/commit/551d2c81da8ea788044effa6bf4768798e53b28d)); merged into main with `--no-ff`. Release approved by Michael (2026-11-22).
+
+Checks run: `cargo fmt --check`, `cargo clippy --all-targets` with and without `--all-features` (`-D warnings`), `cargo test --all-features` (6 unit and 9 bridge tests), `cargo test --no-default-features`, `cargo doc` with `-D warnings`, `cargo package --locked`.
+
+Not tested: no live pool or inference node.
+
+What's left and next: release 0.2.1 from the merge commit once CI on main is green, then check crates.io and docs.rs.
+
 ## 2026-11-22: skip or refresh the answer cache per request (branch `cache-mode`, for 0.2.1)
 
 What changed ([`949e173`](https://github.com/WeirdBrains/weirdnet-openai/commit/949e17373a9f500953087882c3bdf75b64a0328f)): chat and text completions map `"cache": false` (or `"bypass"`/`"off"`) and the `x-weirdnet-cache: off` header to [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent) 0.5.1's `CacheMode::Bypass`, and `"cache": "refresh"` / `x-weirdnet-cache: refresh` to `Refresh`. When both are given the stricter wins (bypass over refresh over use); any other value is a 400, so an eval never silently reads the cache. The `x-weirdnet-cache: hit` reply header is unchanged. New public helpers `request::cache_header` and `request::stricter`. Requested for [Ymir](https://github.com/WeirdBrains/ymir)'s training evals. Additive, so a patch release, 0.2.1.
