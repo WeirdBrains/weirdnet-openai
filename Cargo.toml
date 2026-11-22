@@ -28,3 +28,8 @@ tokio = { version = "1", features = ["net", "sync", "rt", "rt-multi-thread", "ma
 
 [package.metadata.docs.rs]
 all-features = true
+
+# Branch only: the CacheMode commit for weirdnet-agent 0.5.1, not on crates.io yet. Before
+# merging to main: require "0.5.1" above and drop this section.
+[patch.crates-io]
+weirdnet-agent = { git = "https://github.com/WeirdBrains/weirdnet-agent", rev = "64fadb3" }

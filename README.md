@@ -25,6 +25,12 @@ headers are sent once a node accepted the request and sent its early metadata or
 (at most `EARLY_META_WAIT`, 1.5 s, later), so `x-weirdnet-cache: hit` is on streams too; from
 nodes before `weirdnet-agent` 0.4.1 the cache flag arrives only in the final chunk.
 
+Answer cache: send `"cache": false` or `x-weirdnet-cache: off` to skip the nodes' answer cache
+(evals, freshly fine-tuned weights), or `"cache": "refresh"` / `x-weirdnet-cache: refresh` to
+skip the read and store the fresh answer. When both are given the stricter wins; any other value
+is a 400. This is the infer/2 `Request::cache` field (`weirdnet-agent` 0.5.1); nodes older than
+that ignore it.
+
 ```rust
 use std::sync::Arc;
 use weirdnet_openai::{Bridge, BridgeOptions, new_token};

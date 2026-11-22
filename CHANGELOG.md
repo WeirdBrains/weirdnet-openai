@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- `"cache": false` or `x-weirdnet-cache: off` skips the nodes' answer cache; `"cache": "refresh"` or `x-weirdnet-cache: refresh` refreshes it (infer/2 `Request::cache`). The stricter of body and header wins; other values are a 400.
+- `request::cache_header` and `request::stricter`.
+
+### Changed
+
+- Requires weirdnet-agent 0.5.1.
+
 ## [0.2.0] - 2026-11-20
 
 ### Added

@@ -8,7 +8,9 @@
 //! requires a bearer token of at least 16 characters (compared in constant time), and sends no
 //! CORS headers, so web pages can't use it. Answers carry `x-weirdnet-model`, and
 //! `x-weirdnet-cache: hit` and `x-weirdnet-standin` when the pool says so; a request with
-//! `x-wait: 1` waits for its model instead of a stand-in.
+//! `x-wait: 1` waits for its model instead of a stand-in. A request skips the nodes' answer cache
+//! with `"cache": false` or `x-weirdnet-cache: off`, and refreshes it with `"cache": "refresh"`
+//! or `x-weirdnet-cache: refresh` (infer/2 `Request::cache`, `weirdnet-agent` 0.5.1).
 //!
 //! Chat messages may carry image (`image_url`, a `data:image/...` URL) and audio (`input_audio`)
 //! parts. They go to the pool unchanged, which sends them only to a model whose catalog entry
@@ -214,6 +216,20 @@ async fn models(State(st): State<Arc<AppState>>) -> Response {
     }
 }
 
+/// The `x-weirdnet-cache` header with the body's `cache`: the stricter wins. A bad header is a
+/// 400 (the returned response), so an eval that asked to skip the cache never silently reads it.
+fn apply_cache_header(h: &HeaderMap, req: &mut weirdnet_agent::remote::infer::v2::Request) -> Option<Response> {
+    let v = h.get("x-weirdnet-cache")?;
+    match v.to_str().ok().map(request::cache_header) {
+        Some(Ok(mode)) => {
+            req.cache = request::stricter(req.cache, mode);
+            None
+        }
+        Some(Err(e)) => Some(error(StatusCode::BAD_REQUEST, "bad_request", &e.0)),
+        None => Some(error(StatusCode::BAD_REQUEST, "bad_request", "`x-weirdnet-cache` must be off, refresh or use")),
+    }
+}
+
 /// `x-wait: 1` asks to wait for the requested model instead of a stand-in.
 fn wants_wait(h: &HeaderMap) -> bool {
     h.get("x-wait").and_then(|v| v.to_str().ok()).is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
@@ -272,6 +288,9 @@ async fn completions(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes)
         Err(e) => return error(StatusCode::BAD_REQUEST, "bad_request", &e.0),
     };
     req.wait_for_model |= wants_wait(&h);
+    if let Some(r) = apply_cache_header(&h, &mut req) {
+        return r;
+    }
     answer(st, req, stream, Shape::Text).await
 }
 
@@ -334,6 +353,9 @@ async fn chat(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Res
         Err(e) => return error(StatusCode::BAD_REQUEST, "bad_request", &e.0),
     };
     req.wait_for_model |= wants_wait(&h);
+    if let Some(r) = apply_cache_header(&h, &mut req) {
+        return r;
+    }
     answer(st, req, stream, Shape::Chat).await
 }
 

@@ -1,7 +1,7 @@
 //! OpenAI request bodies to `weirdnet-agent` infer/2 requests.
 
 use serde_json::{Map, Value};
-use weirdnet_agent::remote::infer::v2::{EmbedRequest, Request, ResponseFormat};
+use weirdnet_agent::remote::infer::v2::{CacheMode, EmbedRequest, Request, ResponseFormat};
 use weirdnet_agent::{Content, ContentPart, Message, Role, ToolCall, ToolSpec};
 
 /// A request the bridge cannot take; answered with 400.
@@ -213,7 +213,48 @@ fn sampling_and_seed(o: &Map<String, Value>, req: &mut Request) -> Result<(), Ba
         None | Some(Value::Null) => None,
         Some(v) => Some(v.as_u64().ok_or_else(|| bad("`seed` must be a whole number"))?),
     };
+    req.cache = cache(o.get("cache"))?;
     Ok(())
+}
+
+/// The `cache` body parameter (a weirdnet extension): absent, `null`, `true` or `"use"` uses the
+/// node's answer cache; `false`, `"bypass"` or `"off"` skips it; `"refresh"` skips the read and
+/// stores the fresh answer.
+fn cache(v: Option<&Value>) -> Result<CacheMode, BadRequest> {
+    match v {
+        None | Some(Value::Null) | Some(Value::Bool(true)) => Ok(CacheMode::Use),
+        Some(Value::Bool(false)) => Ok(CacheMode::Bypass),
+        Some(Value::String(s)) => cache_word(s).ok_or_else(|| bad("`cache` must be true, false, \"use\", \"bypass\" or \"refresh\"")),
+        Some(_) => Err(bad("`cache` must be true, false, \"use\", \"bypass\" or \"refresh\"")),
+    }
+}
+
+/// A cache mode by name: `use`/`on`, `bypass`/`off`, `refresh` (any case).
+fn cache_word(s: &str) -> Option<CacheMode> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "use" | "on" => Some(CacheMode::Use),
+        "bypass" | "off" => Some(CacheMode::Bypass),
+        "refresh" => Some(CacheMode::Refresh),
+        _ => None,
+    }
+}
+
+/// The `x-weirdnet-cache` request header: `off` (or `bypass`), `refresh`, or `use` (or `on`).
+pub fn cache_header(value: &str) -> Result<CacheMode, BadRequest> {
+    cache_word(value).ok_or_else(|| bad("`x-weirdnet-cache` must be off, refresh or use"))
+}
+
+/// The stricter of two cache modes: `bypass` over `refresh` over `use`.
+pub fn stricter(a: CacheMode, b: CacheMode) -> CacheMode {
+    fn rank(m: CacheMode) -> u8 {
+        match m {
+            CacheMode::Use => 0,
+            CacheMode::Refresh => 1,
+            // Bypass, and any later mode: neither read nor store.
+            _ => 2,
+        }
+    }
+    if rank(b) > rank(a) { b } else { a }
 }
 
 /// A `/v1/completions` body: a raw-prompt request and whether to stream. `prompt` is a string
@@ -365,5 +406,33 @@ mod completion_tests {
         assert_eq!((req.sampling.max_tokens, req.sampling.temperature, req.seed), (Some(5), Some(0.5), Some(3)));
         assert_eq!(req.sampling.stop, ["\n"]);
         assert!(req.tools.is_empty());
+    }
+
+    #[test]
+    fn cache_parameter_and_header() {
+        let base = || json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
+        let with = |v: Value| {
+            let mut b = base();
+            b["cache"] = v;
+            chat(b).map(|(r, _)| r.cache)
+        };
+        assert_eq!(chat(base()).unwrap().0.cache, CacheMode::Use);
+        assert_eq!(with(json!(null)), Ok(CacheMode::Use));
+        assert_eq!(with(json!(true)), Ok(CacheMode::Use));
+        assert_eq!(with(json!(false)), Ok(CacheMode::Bypass));
+        assert_eq!(with(json!("refresh")), Ok(CacheMode::Refresh));
+        assert_eq!(with(json!("Bypass")), Ok(CacheMode::Bypass));
+        assert!(with(json!("sometimes")).is_err());
+        assert!(with(json!(0)).is_err());
+        let (r, _) = completion(json!({"prompt": "Once", "cache": false})).unwrap();
+        assert_eq!(r.cache, CacheMode::Bypass);
+
+        assert_eq!(cache_header("off"), Ok(CacheMode::Bypass));
+        assert_eq!(cache_header(" REFRESH "), Ok(CacheMode::Refresh));
+        assert_eq!(cache_header("use"), Ok(CacheMode::Use));
+        assert!(cache_header("hit").is_err());
+        assert_eq!(stricter(CacheMode::Use, CacheMode::Refresh), CacheMode::Refresh);
+        assert_eq!(stricter(CacheMode::Bypass, CacheMode::Refresh), CacheMode::Bypass);
+        assert_eq!(stricter(CacheMode::Refresh, CacheMode::Use), CacheMode::Refresh);
     }
 }
