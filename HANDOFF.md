@@ -2,6 +2,16 @@
 
 Running log for [weirdnet-openai](https://github.com/WeirdBrains/weirdnet-openai), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-22: released 0.2.1
+
+What changed: released with `scripts/weirdnet_release.py` (approved by Michael, 2026-11-22). Release commit [`0f3fb63`](https://github.com/WeirdBrains/weirdnet-openai/commit/0f3fb635b2cd6e79e385e00e8d6ec091535aee75), tag [`v0.2.1`](https://github.com/WeirdBrains/weirdnet-openai/releases/tag/v0.2.1), on [crates.io](https://crates.io/crates/weirdnet-openai/0.2.1) and [docs.rs](https://docs.rs/weirdnet-openai/0.2.1).
+
+Checks run: the release script's checks (fmt, clippy `-D warnings`, tests, docs), `cargo publish` verification, CI on the release commit (green), the docs.rs pages for the new APIs.
+
+Not tested: no live node.
+
+What's left and next: nothing for this release; the [site pages](https://net.weirdbrains.com) are merged.
+
 ## 2026-11-22: ready for 0.2.1 (merge of `cache-mode`)
 
 What changed: reverted the branch-only CI commit ([`54875cc`](https://github.com/WeirdBrains/weirdnet-openai/commit/54875ccf3b6360822c43d5e6eb87f4e85e311c82)) and moved to [weirdnet-agent 0.5.1](https://crates.io/crates/weirdnet-agent/0.5.1) from crates.io with no `[patch.crates-io]` ([`551d2c8`](https://github.com/WeirdBrains/weirdnet-openai/commit/551d2c81da8ea788044effa6bf4768798e53b28d)); merged into main with `--no-ff`. Release approved by Michael (2026-11-22).
