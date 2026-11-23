@@ -148,6 +148,7 @@ async fn start() -> (std::net::SocketAddr, Arc<Mutex<u32>>) {
     feed.publish(vec![
         CatalogModel::new("m", Purpose::Chat, ModelState::Warm).with_replicas(1),
         CatalogModel::new("vision", Purpose::Chat, ModelState::Loadable).with_inputs(Modalities::VISION),
+        CatalogModel::new("m-tune", Purpose::Chat, ModelState::Loadable).with_base("m"),
     ]);
     let dialer = MemoryDialer::new();
     let admission = Admission::with_queue(4, 4);
@@ -270,6 +271,8 @@ async fn images_reach_a_vision_model_and_never_a_text_only_one() {
     let v: Value = c.get(format!("http://{addr}/v1/models")).bearer_auth(TOKEN).send().await.unwrap().json().await.unwrap();
     assert_eq!((v["data"][1]["id"].as_str(), v["data"][1]["weirdnet"]["vision"].as_bool()), (Some("vision"), Some(true)));
     assert_eq!(v["data"][0]["weirdnet"]["vision"], false);
+    let by_id = |id: &str| v["data"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap()["weirdnet"]["base"].clone();
+    assert_eq!((by_id("m-tune"), by_id("m")), (json!("m"), Value::Null));
 }
 
 #[tokio::test(flavor = "multi_thread")]

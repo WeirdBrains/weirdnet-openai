@@ -2,6 +2,15 @@
 
 Running log for [weirdnet-openai](https://github.com/WeirdBrains/weirdnet-openai), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+
+## 2026-11-23: adapter scale and base (0.2.2)
+
+What changed: a body's `"adapter_scale"` maps to infer/2 `Request::adapter_scale` (weirdnet-agent 0.5.2); `/v1/models` has `weirdnet.base` for LoRA adapters. See [CHANGELOG.md](CHANGELOG.md).
+
+Checks run: fmt, clippy `-D warnings --all-features`, tests `--all-features` (6 unit, 9 bridge), `cargo doc -D warnings`.
+
+Not tested: against a real llama.cpp node with adapters (weirdnet-backends 0.4.1 applies the scale).
+
 ## 2026-11-22: released 0.2.1
 
 What changed: released with `scripts/weirdnet_release.py` (approved by Michael, 2026-11-22). Release commit [`0f3fb63`](https://github.com/WeirdBrains/weirdnet-openai/commit/0f3fb635b2cd6e79e385e00e8d6ec091535aee75), tag [`v0.2.1`](https://github.com/WeirdBrains/weirdnet-openai/releases/tag/v0.2.1), on [crates.io](https://crates.io/crates/weirdnet-openai/0.2.1) and [docs.rs](https://docs.rs/weirdnet-openai/0.2.1).

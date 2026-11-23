@@ -185,7 +185,9 @@ pub fn chat(body: Value) -> Result<(Request, bool), BadRequest> {
     Ok((req, stream))
 }
 
-/// `model`, sampling parameters and `seed`, shared by chat and text completions.
+/// `model`, sampling parameters, `seed`, `cache` and `adapter_scale` (a weirdnet extension: how
+/// strongly a LoRA adapter model applies, infer/2 `Request::adapter_scale`), shared by chat and
+/// text completions.
 fn sampling_and_seed(o: &Map<String, Value>, req: &mut Request) -> Result<(), BadRequest> {
     req.model = model(o)?;
     let s = &mut req.sampling;
@@ -214,6 +216,10 @@ fn sampling_and_seed(o: &Map<String, Value>, req: &mut Request) -> Result<(), Ba
         Some(v) => Some(v.as_u64().ok_or_else(|| bad("`seed` must be a whole number"))?),
     };
     req.cache = cache(o.get("cache"))?;
+    req.adapter_scale = match f32_of(o, "adapter_scale")? {
+        Some(s) if !s.is_finite() => return Err(bad("`adapter_scale` must be a finite number")),
+        s => s,
+    };
     Ok(())
 }
 
@@ -426,6 +432,14 @@ mod completion_tests {
         assert!(with(json!(0)).is_err());
         let (r, _) = completion(json!({"prompt": "Once", "cache": false})).unwrap();
         assert_eq!(r.cache, CacheMode::Bypass);
+
+        assert_eq!(chat(base()).unwrap().0.adapter_scale, None);
+        let mut b = base();
+        b["adapter_scale"] = json!(0.5);
+        assert_eq!(chat(b).unwrap().0.adapter_scale, Some(0.5));
+        let (r, _) = completion(json!({"prompt": "Once", "adapter_scale": 2})).unwrap();
+        assert_eq!(r.adapter_scale, Some(2.0));
+        assert!(completion(json!({"prompt": "Once", "adapter_scale": "high"})).is_err());
 
         assert_eq!(cache_header("off"), Ok(CacheMode::Bypass));
         assert_eq!(cache_header(" REFRESH "), Ok(CacheMode::Refresh));
