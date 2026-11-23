@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- `"adapter_scale"` in a chat or completion body sets how strongly a LoRA adapter model applies for that request (infer/2 `Request::adapter_scale`); not a finite number is a 400.
+- `/v1/models` has `weirdnet.base`: a LoRA adapter's base model (catalog/1 `CatalogModel::base`), `null` for models.
+
+### Changed
+
+- Needs weirdnet-agent 0.5.2.
+
 ## [0.2.1] - 2026-11-22
 
 ### Added
