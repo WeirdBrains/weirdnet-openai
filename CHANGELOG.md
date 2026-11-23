@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-23
+
 ### Added
 
 - `"adapter_scale"` in a chat or completion body sets how strongly a LoRA adapter model applies for that request (infer/2 `Request::adapter_scale`); not a finite number is a 400.
