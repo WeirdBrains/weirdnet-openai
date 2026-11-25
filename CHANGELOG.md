@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-25
+
 ### Added
 
 - `/v1/models` has `weirdnet.origin` (`hub`, `upload` or `train`) and `weirdnet.license` when the node says (catalog/1 `CatalogModel::origin` and `license`), `null` otherwise.
