@@ -3,6 +3,18 @@
 Running log for [weirdnet-openai](https://github.com/WeirdBrains/weirdnet-openai), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
 
+## 2026-11-25: released 0.2.3 (/v1/models origin and license)
+
+What changed: the /v1/models origin and license work below, released with `scripts/weirdnet_release.py --patch` from main at [`bf765d0`](https://github.com/WeirdBrains/weirdnet-openai/commit/bf765d0006b70e10e5d02666863b197d3677796e) (CI green). Release commit [`5bca803`](https://github.com/WeirdBrains/weirdnet-openai/commit/5bca803b00c0dc6406e067bdf5cf88c8f8a4b9ee), tag [`v0.2.3`](https://github.com/WeirdBrains/weirdnet-openai/tree/v0.2.3), on [crates.io](https://crates.io/crates/weirdnet-openai/0.2.3) and [docs.rs](https://docs.rs/weirdnet-openai/0.2.3). No GitHub release page; the tag and the changelog carry the notes.
+
+Release basis: m3talsmith's standing rule of 2026-11-24 for additive Weirdnet patch releases; `cargo semver-checks` found nothing that needs more than a patch.
+
+Checks run: the release script's checks (fmt, clippy `-D warnings --all-features`, tests `--all-features`, `cargo doc -D warnings`) and `cargo publish` verification.
+
+Not tested: no live node or pool.
+
+What's left and next: nothing for this release; the site pages follow.
+
 ## 2026-11-25: `/v1/models` origin and license (for 0.2.3)
 
 What changed ([`5ae3036`](https://github.com/WeirdBrains/weirdnet-openai/commit/5ae30369eb381bcf887c61047e1025511a88057f), branch `feat/catalog-origin`, merged to main with `--no-ff`): `/v1/models` lists `weirdnet.origin` (`hub`, `upload` or `train`) and `weirdnet.license` per model from catalog/1 `CatalogModel::origin`/`license` ([weirdnet-agent](https://crates.io/crates/weirdnet-agent) 0.5.4, now the minimum), `null` when the node does not say. Additive JSON fields: a patch release, 0.2.3.
