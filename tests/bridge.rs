@@ -148,7 +148,7 @@ async fn start() -> (std::net::SocketAddr, Arc<Mutex<u32>>) {
     feed.publish(vec![
         CatalogModel::new("m", Purpose::Chat, ModelState::Warm).with_replicas(1),
         CatalogModel::new("vision", Purpose::Chat, ModelState::Loadable).with_inputs(Modalities::VISION),
-        CatalogModel::new("m-tune", Purpose::Chat, ModelState::Loadable).with_base("m"),
+        CatalogModel::new("m-tune", Purpose::Chat, ModelState::Loadable).with_base("m").with_origin("train").with_license("Apache-2.0"),
     ]);
     let dialer = MemoryDialer::new();
     let admission = Admission::with_queue(4, 4);
@@ -273,6 +273,9 @@ async fn images_reach_a_vision_model_and_never_a_text_only_one() {
     assert_eq!(v["data"][0]["weirdnet"]["vision"], false);
     let by_id = |id: &str| v["data"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap()["weirdnet"]["base"].clone();
     assert_eq!((by_id("m-tune"), by_id("m")), (json!("m"), Value::Null));
+    let field = |id: &str, f: &str| v["data"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap()["weirdnet"][f].clone();
+    assert_eq!((field("m-tune", "origin"), field("m-tune", "license")), (json!("train"), json!("Apache-2.0")));
+    assert_eq!((field("m", "origin"), field("m", "license")), (Value::Null, Value::Null));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -8,7 +8,7 @@ through it.
 | Route | |
 |---|---|
 | `POST /v1/chat/completions` | streaming (SSE, `data: [DONE]`) or not; reasoning as `reasoning_content`; tool calls; usage |
-| `GET /v1/models` | the pool catalog, with `weirdnet: {state, purpose, replicas, context, revision, vision, audio}` |
+| `GET /v1/models` | the pool catalog, with `weirdnet: {state, purpose, replicas, context, revision, vision, audio, base, origin, license}` (`origin` is `hub`, `upload` or `train` and `license` an SPDX id when the node says, else `null`) |
 | `POST /v1/completions` | a raw prompt (one per request), streaming or not; usage; 501 from nodes that can't take raw prompts |
 | `POST /v1/embeddings` | float vectors; `usage.prompt_tokens` from the node |
 | `GET /metrics` | Prometheus: `weirdnet_bridge_{requests,errors,cache_hits,standin}_total` |

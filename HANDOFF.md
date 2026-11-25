@@ -3,6 +3,18 @@
 Running log for [weirdnet-openai](https://github.com/WeirdBrains/weirdnet-openai), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
 
+## 2026-11-25: `/v1/models` origin and license (for 0.2.3)
+
+What changed ([`5ae3036`](https://github.com/WeirdBrains/weirdnet-openai/commit/5ae30369eb381bcf887c61047e1025511a88057f), branch `feat/catalog-origin`, merged to main with `--no-ff`): `/v1/models` lists `weirdnet.origin` (`hub`, `upload` or `train`) and `weirdnet.license` per model from catalog/1 `CatalogModel::origin`/`license` ([weirdnet-agent](https://crates.io/crates/weirdnet-agent) 0.5.4, now the minimum), `null` when the node does not say. Additive JSON fields: a patch release, 0.2.3.
+
+Checks run: `cargo fmt --check`, `cargo build`, `cargo clippy --all-targets` with and without `--all-features` (`-D warnings`), `cargo test --all-features` (6 unit, 9 bridge; the multimodal bridge test now checks both fields on an adapter that has them and `null` on a model without), `cargo doc --no-deps --all-features` with `-D warnings`, and `cargo semver-checks` against 0.2.2 (no semver update required).
+
+Not tested: no live pool; only the in-memory catalog in the bridge tests.
+
+Release basis: m3talsmith's standing rule of 2026-11-24 allows additive Weirdnet patch releases without asking; minor bumps still need his OK.
+
+What's left and next: release 0.2.3 once CI on main is green.
+
 ## 2026-11-23: released 0.2.2
 
 What changed: Released with `scripts/weirdnet_release.py` (approved by Michael, 2026-11-23). Release commit [`0a3b1cc`](https://github.com/WeirdBrains/weirdnet-openai/commit/0a3b1cca06ba668ae5ae4b599077ef399f3fd40a), tag [`v0.2.2`](https://github.com/WeirdBrains/weirdnet-openai/releases/tag/v0.2.2), on [crates.io](https://crates.io/crates/weirdnet-openai/0.2.2) and [docs.rs](https://docs.rs/weirdnet-openai/0.2.2). See the entry below and [CHANGELOG.md](CHANGELOG.md).
