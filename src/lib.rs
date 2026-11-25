@@ -15,7 +15,9 @@
 //! Chat messages may carry image (`image_url`, a `data:image/...` URL) and audio (`input_audio`)
 //! parts. They go to the pool unchanged, which sends them only to a model whose catalog entry
 //! takes them; when none does the answer is 400. `/v1/models` lists `weirdnet.vision` and
-//! `weirdnet.audio` per model, and `weirdnet.base` for a LoRA adapter (its base model). A body's
+//! `weirdnet.audio` per model, `weirdnet.base` for a LoRA adapter (its base model), and
+//! `weirdnet.origin` (`hub`, `upload` or `train`) and `weirdnet.license` when the node says
+//! (catalog/1 `CatalogModel::origin`/`license`, `weirdnet-agent` 0.5.4; `null` otherwise). A body's
 //! `"adapter_scale"` sets how strongly an adapter applies for that request (infer/2
 //! `Request::adapter_scale`, `weirdnet-agent` 0.5.2; llama.cpp nodes only). Bodies may be up to 32 MiB.
 //!
@@ -208,6 +210,7 @@ async fn models(State(st): State<Arc<AppState>>) -> Response {
                         "weirdnet": {
                             "state": m.state, "purpose": m.purpose, "replicas": m.replicas, "context": m.context, "revision": m.revision,
                             "vision": m.inputs.vision, "audio": m.inputs.audio, "base": m.base,
+                            "origin": m.origin, "license": m.license,
                         },
                     })
                 })
