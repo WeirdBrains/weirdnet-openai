@@ -3,6 +3,16 @@
 Running log for [weirdnet-openai](https://github.com/WeirdBrains/weirdnet-openai), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
 
+## 2026-11-26: released 0.2.4 (media and request limits)
+
+What changed: release commit [`81f770c`](https://github.com/WeirdBrains/weirdnet-openai/commit/81f770c1bcfd6f54aadb82b12f45164d4c74852d) (CI green), tag [`v0.2.4`](https://github.com/WeirdBrains/weirdnet-openai/tree/v0.2.4), then `scripts/weirdnet_release.py crates --tag v0.2.4`: on [crates.io](https://crates.io/crates/weirdnet-openai/0.2.4), docs on [docs.rs](https://docs.rs/weirdnet-openai/0.2.4). A scratch app with weirdnet-agent 0.5.7 (`pool`, `serve`, `jobs`), weirdnet-backends 0.4.8 (`node`), weirdnet-openai 0.2.4 and weirdnet-sync 0.8.5 builds and runs on weirdnet-net 0.8.2 and 0.8.3 with one copy of each weirdnet crate. The site is updated on [net.weirdbrains.com](https://net.weirdbrains.com).
+
+Checks run: the release script's checks, CI on the release commit and `cargo publish` verification; the rest is in the entry below.
+
+Not tested: as below.
+
+What's left and next: nothing for this release.
+
 ## 2026-11-26: configurable request size limit (for 0.2.4)
 
 What changed: [`fdeb834`](https://github.com/WeirdBrains/weirdnet-openai/commit/fdeb83475b0b1997b2847c0c741a63ec8f9f8ba2) replaces the fixed 32 MiB body limit with `Bridge::with_max_request_bytes(usize)` (read back with `Bridge::max_request_bytes()`; default `DEFAULT_MAX_REQUEST_BYTES` = 32 MiB). `BridgeOptions` keeps its fields: adding one would break struct literals, so the setting lives on `Bridge`. A body over the limit gets 413 `request_too_large` whose message names the limit in bytes and in KiB/MiB, plus an `x-weirdnet-max-request-bytes` header; the rest of the body is drained (up to 64 MiB more) so clients read the 413 instead of a broken pipe, for `Content-Length` and chunked bodies alike. `/v1/models` adds `weirdnet.max_request_bytes` (the smaller of the bridge's and the node's) and `weirdnet.limits` ([weirdnet-agent](https://crates.io/crates/weirdnet-agent) 0.5.7 `CatalogModel::limits`). `weirdnet-agent` floor raised to 0.5.7.
