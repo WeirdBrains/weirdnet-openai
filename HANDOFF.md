@@ -3,6 +3,16 @@
 Running log for [weirdnet-openai](https://github.com/WeirdBrains/weirdnet-openai), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
 
+## 2026-11-26: configurable request size limit (for 0.2.4)
+
+What changed: [`fdeb834`](https://github.com/WeirdBrains/weirdnet-openai/commit/fdeb83475b0b1997b2847c0c741a63ec8f9f8ba2) replaces the fixed 32 MiB body limit with `Bridge::with_max_request_bytes(usize)` (read back with `Bridge::max_request_bytes()`; default `DEFAULT_MAX_REQUEST_BYTES` = 32 MiB). `BridgeOptions` keeps its fields: adding one would break struct literals, so the setting lives on `Bridge`. A body over the limit gets 413 `request_too_large` whose message names the limit in bytes and in KiB/MiB, plus an `x-weirdnet-max-request-bytes` header; the rest of the body is drained (up to 64 MiB more) so clients read the 413 instead of a broken pipe, for `Content-Length` and chunked bodies alike. `/v1/models` adds `weirdnet.max_request_bytes` (the smaller of the bridge's and the node's) and `weirdnet.limits` ([weirdnet-agent](https://crates.io/crates/weirdnet-agent) 0.5.7 `CatalogModel::limits`). `weirdnet-agent` floor raised to 0.5.7.
+
+Checks run: `cargo fmt --check`; `cargo clippy --all-targets -D warnings` (default and all features); `cargo test` default/all features and `--no-default-features` (6 unit, 11 bridge tests, including the default 32 MiB limit, a custom 64 KiB limit admitting a body of exactly that size and refusing one byte more, chunked bodies, and `/v1/models`); `cargo doc -D warnings`; `cargo semver-checks` against 0.2.3: no semver update required.
+
+Not tested: real clients other than reqwest; limits above 32 MiB end to end (infer/2 carries at most 32 MiB per message).
+
+What's left and next: release 0.2.4; `video_url` handling later.
+
 ## 2026-11-25: released 0.2.3 (/v1/models origin and license)
 
 What changed: the /v1/models origin and license work below, released with `scripts/weirdnet_release.py --patch` from main at [`bf765d0`](https://github.com/WeirdBrains/weirdnet-openai/commit/bf765d0006b70e10e5d02666863b197d3677796e) (CI green). Release commit [`5bca803`](https://github.com/WeirdBrains/weirdnet-openai/commit/5bca803b00c0dc6406e067bdf5cf88c8f8a4b9ee), tag [`v0.2.3`](https://github.com/WeirdBrains/weirdnet-openai/tree/v0.2.3), on [crates.io](https://crates.io/crates/weirdnet-openai/0.2.3) and [docs.rs](https://docs.rs/weirdnet-openai/0.2.3). No GitHub release page; the tag and the changelog carry the notes.
