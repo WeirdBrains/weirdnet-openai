@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-26
+
 ### Added
 
 - `Bridge::with_max_request_bytes` and `DEFAULT_MAX_REQUEST_BYTES` (32 MiB): a configurable request size limit; larger bodies get a 413 that names it.
