@@ -19,7 +19,15 @@
 //! `weirdnet.origin` (`hub`, `upload` or `train`) and `weirdnet.license` when the node says
 //! (catalog/1 `CatalogModel::origin`/`license`, `weirdnet-agent` 0.5.4; `null` otherwise). A body's
 //! `"adapter_scale"` sets how strongly an adapter applies for that request (infer/2
-//! `Request::adapter_scale`, `weirdnet-agent` 0.5.2; llama.cpp nodes only). Bodies may be up to 32 MiB.
+//! `Request::adapter_scale`, `weirdnet-agent` 0.5.2; llama.cpp nodes only).
+//!
+//! Bodies may be up to [`DEFAULT_MAX_REQUEST_BYTES`] (32 MiB) unless the bridge is set otherwise
+//! ([`Bridge::with_max_request_bytes`]). A larger body is refused with 413
+//! (`request_too_large`) whose message names the limit, and the `x-weirdnet-max-request-bytes`
+//! header carries it. `/v1/models` reports it per model as `weirdnet.max_request_bytes` (the
+//! smaller of the bridge's and the node's), with the model's media limits under
+//! `weirdnet.limits` (catalog/1 `CatalogModel::limits`, `weirdnet-agent` 0.5.7; only the limits the
+//! node knows).
 //!
 //! `/v1/completions` sends the prompt as an infer/2 raw prompt (`weirdnet-agent` 0.4.1); nodes
 //! that can't take one answer 501. A streamed answer waits up to [`EARLY_META_WAIT`] after a node
@@ -42,6 +50,7 @@ use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use weirdnet_agent::CancelToken;
@@ -52,6 +61,9 @@ use weirdnet_agent::remote::pool::{Answer, EventSink, Interrupted, NoEvents, Poo
 /// How long a streamed answer's headers wait, after a node accepted it, for early metadata (a
 /// cache hit) or the first output. A node that sends neither in time gets headers without it.
 pub const EARLY_META_WAIT: Duration = Duration::from_millis(1500);
+
+/// The largest request body a bridge accepts unless set otherwise: 32 MiB.
+pub const DEFAULT_MAX_REQUEST_BYTES: usize = 32 << 20;
 
 /// Where the bridge listens and the token it requires.
 #[derive(Clone)]
@@ -77,6 +89,7 @@ impl std::fmt::Debug for BridgeOptions {
 pub struct Bridge {
     listener: tokio::net::TcpListener,
     token: String,
+    max_request_bytes: usize,
 }
 
 #[derive(Default)]
@@ -91,6 +104,7 @@ struct AppState {
     pool: Arc<Pool>,
     token: String,
     port: u16,
+    max_request_bytes: usize,
     metrics: Metrics,
 }
 
@@ -101,7 +115,21 @@ impl Bridge {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "the bridge token must be at least 16 characters"));
         }
         let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], opts.port))).await?;
-        Ok(Self { listener, token: opts.token })
+        Ok(Self { listener, token: opts.token, max_request_bytes: DEFAULT_MAX_REQUEST_BYTES })
+    }
+
+    /// The largest request body accepted, in bytes (at least 1; default
+    /// [`DEFAULT_MAX_REQUEST_BYTES`]). Larger bodies get 413 naming the limit. infer/2 carries at
+    /// most `weirdnet_agent::remote::codec::MAX_FRAME` (32 MiB) per message, so a higher limit
+    /// only helps bodies that shrink on the way to the pool.
+    pub fn with_max_request_bytes(mut self, bytes: usize) -> Self {
+        self.max_request_bytes = bytes.max(1);
+        self
+    }
+
+    /// See [`Bridge::with_max_request_bytes`].
+    pub fn max_request_bytes(&self) -> usize {
+        self.max_request_bytes
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
@@ -111,7 +139,7 @@ impl Bridge {
     /// Serves until `shutdown` resolves.
     pub async fn serve(self, pool: Arc<Pool>, shutdown: impl Future<Output = ()> + Send + 'static) -> std::io::Result<()> {
         let port = self.listener.local_addr()?.port();
-        let state = Arc::new(AppState { pool, token: self.token, port, metrics: Metrics::default() });
+        let state = Arc::new(AppState { pool, token: self.token, port, max_request_bytes: self.max_request_bytes, metrics: Metrics::default() });
         axum::serve(self.listener, router(state)).with_graceful_shutdown(shutdown).await
     }
 }
@@ -124,7 +152,8 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/v1/embeddings", post(embeddings))
         .route("/metrics", get(metrics))
         .fallback(not_found)
-        .layer(DefaultBodyLimit::max(32 << 20))
+        .layer(DefaultBodyLimit::max(state.max_request_bytes))
+        .layer(middleware::from_fn_with_state(state.clone(), size_limit))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
 }
@@ -141,6 +170,66 @@ async fn guard(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Res
     }
     st.metrics.requests.fetch_add(1, Ordering::Relaxed);
     next.run(req).await
+}
+
+/// How much of a body over the limit is still read (and dropped), so the client finishes sending
+/// and reads the 413 instead of a broken connection; past this the connection is just closed.
+const DRAIN_BYTES: u64 = 64 << 20;
+
+/// Bodies over the limit get a 413 that names it: the body is read up to the limit (or not at
+/// all when `Content-Length` is over it), the rest is drained, and handlers only ever see bodies
+/// that fit.
+async fn size_limit(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    let limit = st.max_request_bytes;
+    let declared = req.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok());
+    let mut over = declared.is_some_and(|n| n > limit as u64);
+    let (parts, body) = req.into_parts();
+    let mut stream = body.into_data_stream();
+    let mut buf: Vec<u8> = Vec::with_capacity(declared.map_or(0, |n| n.min(limit as u64) as usize));
+    let mut seen: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            return error(StatusCode::BAD_REQUEST, "bad_request", "could not read the request body");
+        };
+        seen += chunk.len() as u64;
+        if !over && buf.len() + chunk.len() > limit {
+            over = true;
+            buf = Vec::new();
+        }
+        if over {
+            if seen > (limit as u64).saturating_add(DRAIN_BYTES) {
+                break;
+            }
+            continue;
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    if over {
+        return too_large(&st);
+    }
+    next.run(Request::from_parts(parts, axum::body::Body::from(buf))).await
+}
+
+fn too_large(st: &AppState) -> Response {
+    st.metrics.errors.fetch_add(1, Ordering::Relaxed);
+    let limit = st.max_request_bytes;
+    let message = format!(
+        "the request body is larger than this bridge's limit of {limit} bytes ({}); send less, or raise the bridge's max_request_bytes",
+        human_bytes(limit)
+    );
+    let mut r = error(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large", &message);
+    r.headers_mut().insert(HeaderName::from_static("x-weirdnet-max-request-bytes"), HeaderValue::from(limit as u64));
+    r
+}
+
+/// `32 MiB`, `512 KiB` or `1000 bytes`.
+fn human_bytes(n: usize) -> String {
+    match n {
+        n if n >= 1 << 20 && n % (1 << 20) == 0 => format!("{} MiB", n >> 20),
+        n if n >= 1 << 20 => format!("{:.1} MiB", n as f64 / f64::from(1 << 20)),
+        n if n >= 1 << 10 && n % (1 << 10) == 0 => format!("{} KiB", n >> 10),
+        n => format!("{n} bytes"),
+    }
 }
 
 fn same(a: &[u8], b: &[u8]) -> bool {
@@ -202,6 +291,9 @@ async fn models(State(st): State<Arc<AppState>>) -> Response {
                 .models
                 .iter()
                 .map(|m| {
+                    let max_request_bytes = m.limits.max_request_bytes.map_or(st.max_request_bytes as u64, |n| n.min(st.max_request_bytes as u64));
+                    let mut limits = m.limits;
+                    limits.max_request_bytes = Some(max_request_bytes);
                     json!({
                         "id": m.id,
                         "object": "model",
@@ -211,6 +303,7 @@ async fn models(State(st): State<Arc<AppState>>) -> Response {
                             "state": m.state, "purpose": m.purpose, "replicas": m.replicas, "context": m.context, "revision": m.revision,
                             "vision": m.inputs.vision, "audio": m.inputs.audio, "base": m.base,
                             "origin": m.origin, "license": m.license,
+                            "max_request_bytes": max_request_bytes, "limits": limits,
                         },
                     })
                 })

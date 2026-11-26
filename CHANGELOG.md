@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Bridge::with_max_request_bytes` and `DEFAULT_MAX_REQUEST_BYTES` (32 MiB): a configurable request size limit; larger bodies get a 413 that names it.
+- `/v1/models` has `weirdnet.max_request_bytes` and `weirdnet.limits` (catalog/1 `CatalogModel::limits`, weirdnet-agent 0.5.7).
+
 ## [0.2.3] - 2026-11-25
 
 ### Added

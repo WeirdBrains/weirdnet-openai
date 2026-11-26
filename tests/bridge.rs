@@ -10,8 +10,8 @@ use weirdnet_agent::remote::infer::v2::{self, CacheMode, EmbedBackend, Finish, I
 use weirdnet_agent::remote::infer::{Admission, InferHost};
 use weirdnet_agent::remote::pool::Pool;
 use weirdnet_agent::remote::{Caller, MemoryDialer, RemoteError};
-use weirdnet_agent::{CancelToken, ContentPart, Modalities, ModelBackend, ToolCall};
-use weirdnet_openai::{Bridge, BridgeOptions, new_token};
+use weirdnet_agent::{CancelToken, ContentPart, MediaLimits, Modalities, ModelBackend, ToolCall};
+use weirdnet_openai::{Bridge, BridgeOptions, DEFAULT_MAX_REQUEST_BYTES, new_token};
 
 const TOKEN: &str = "0123456789abcdef0123";
 
@@ -142,12 +142,19 @@ impl InferHost for Host {
 }
 
 async fn start() -> (std::net::SocketAddr, Arc<Mutex<u32>>) {
+    start_with(None).await
+}
+
+/// With `max_request_bytes`, the bridge's request limit is set to it.
+async fn start_with(max_request_bytes: Option<usize>) -> (std::net::SocketAddr, Arc<Mutex<u32>>) {
     let cancelled = Arc::new(Mutex::new(0));
     let host: Arc<dyn InferHost> = Arc::new(Host { cancelled: cancelled.clone() });
     let feed = CatalogFeed::new(Arc::new(|_: &Caller| Ok(())));
     feed.publish(vec![
         CatalogModel::new("m", Purpose::Chat, ModelState::Warm).with_replicas(1),
-        CatalogModel::new("vision", Purpose::Chat, ModelState::Loadable).with_inputs(Modalities::VISION),
+        CatalogModel::new("vision", Purpose::Chat, ModelState::Loadable)
+            .with_inputs(Modalities::VISION)
+            .with_limits(MediaLimits::new().with_max_images(4).with_image_tokens(256).with_image_edge(896).with_max_request_bytes(1 << 30)),
         CatalogModel::new("m-tune", Purpose::Chat, ModelState::Loadable).with_base("m").with_origin("train").with_license("Apache-2.0"),
     ]);
     let dialer = MemoryDialer::new();
@@ -164,7 +171,11 @@ async fn start() -> (std::net::SocketAddr, Arc<Mutex<u32>>) {
         });
     });
     let pool = Arc::new(Pool::new(Arc::new(dialer), vec!["inference".to_string()]));
-    let bridge = Bridge::bind(BridgeOptions::new(0, TOKEN)).await.unwrap();
+    let mut bridge = Bridge::bind(BridgeOptions::new(0, TOKEN)).await.unwrap();
+    assert_eq!(bridge.max_request_bytes(), DEFAULT_MAX_REQUEST_BYTES);
+    if let Some(n) = max_request_bytes {
+        bridge = bridge.with_max_request_bytes(n);
+    }
     let addr = bridge.local_addr().unwrap();
     tokio::spawn(bridge.serve(pool, std::future::pending()));
     (addr, cancelled)
@@ -475,4 +486,75 @@ async fn continue_final_message_returns_only_the_continuation() {
     let mut bad = body;
     bad["messages"] = json!([{"role": "user", "content": "hi"}]);
     assert_eq!(c.post(&url).bearer_auth(TOKEN).json(&bad).send().await.unwrap().status(), 400);
+}
+
+/// A chat body of exactly `len` bytes.
+fn chat_body(len: usize) -> String {
+    let make = |pad: usize| json!({"model": "m", "messages": [{"role": "user", "content": "a".repeat(pad)}]}).to_string();
+    let base = make(0).len();
+    assert!(len >= base);
+    let body = make(len - base);
+    assert_eq!(body.len(), len);
+    body
+}
+
+async fn assert_too_large(r: reqwest::Response, limit: usize, human: &str) {
+    assert_eq!(r.status(), 413);
+    assert_eq!(r.headers()["x-weirdnet-max-request-bytes"], limit.to_string().as_str());
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "request_too_large");
+    let msg = v["error"]["message"].as_str().unwrap();
+    assert!(msg.contains(&format!("{limit} bytes")) && msg.contains(human) && msg.contains("max_request_bytes"), "{msg}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_default_request_limit_is_32_mib() {
+    assert_eq!(DEFAULT_MAX_REQUEST_BYTES, 32 << 20);
+    assert_eq!(Bridge::bind(BridgeOptions::new(0, TOKEN)).await.unwrap().with_max_request_bytes(0).max_request_bytes(), 1, "at least one byte");
+    let (addr, _) = start().await;
+    let c = reqwest::Client::new();
+    let url = format!("http://{addr}/v1/chat/completions");
+    let r = c.post(&url).bearer_auth(TOKEN).header("content-type", "application/json").body(chat_body(1 << 20)).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let r = c.post(&url).bearer_auth(TOKEN).header("content-type", "application/json").body(chat_body((32 << 20) + 1)).send().await.unwrap();
+    assert_too_large(r, 32 << 20, "32 MiB").await;
+    let v: Value = c.get(format!("http://{addr}/v1/models")).bearer_auth(TOKEN).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v["data"][0]["weirdnet"]["max_request_bytes"], 32 << 20);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custom_request_limit_admits_up_to_it_and_names_it_in_the_413() {
+    let limit = 64 << 10;
+    let (addr, _) = start_with(Some(limit)).await;
+    let c = reqwest::Client::new();
+    let url = format!("http://{addr}/v1/chat/completions");
+    let post = |body: String| c.post(&url).bearer_auth(TOKEN).header("content-type", "application/json").body(body);
+    let r = post(chat_body(limit)).send().await.unwrap();
+    assert_eq!(r.status(), 200, "exactly at the limit");
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["choices"][0]["message"]["content"], "Hello");
+    assert_too_large(post(chat_body(limit + 1)).send().await.unwrap(), limit, "64 KiB").await;
+    // A chunked body with no Content-Length is cut off at the limit too.
+    let chunks: Vec<Result<Vec<u8>, std::io::Error>> = chat_body(limit + 4096).into_bytes().chunks(4096).map(|c| Ok(c.to_vec())).collect();
+    let r = c
+        .post(&url)
+        .bearer_auth(TOKEN)
+        .header("content-type", "application/json")
+        .body(reqwest::Body::wrap_stream(futures::stream::iter(chunks)))
+        .send()
+        .await
+        .unwrap();
+    assert_too_large(r, limit, "64 KiB").await;
+    let r = c.post(format!("http://{addr}/v1/embeddings")).bearer_auth(TOKEN).body(vec![b' '; limit + 1]).send().await.unwrap();
+    assert_too_large(r, limit, "64 KiB").await;
+    // Unauthenticated callers learn nothing about it.
+    assert_eq!(c.post(&url).body(chat_body(limit + 1)).send().await.unwrap().status(), 401);
+
+    // /v1/models reports the limit per model: the smaller of the bridge's and the node's, plus
+    // the media limits the node knows.
+    let v: Value = c.get(format!("http://{addr}/v1/models")).bearer_auth(TOKEN).send().await.unwrap().json().await.unwrap();
+    let vision = v["data"].as_array().unwrap().iter().find(|m| m["id"] == "vision").unwrap();
+    assert_eq!(vision["weirdnet"]["max_request_bytes"], limit);
+    assert_eq!(vision["weirdnet"]["limits"], json!({"max_images": 4, "image_tokens": 256, "image_edge": 896, "max_request_bytes": limit}));
+    assert_eq!(v["data"][0]["weirdnet"]["limits"], json!({"max_request_bytes": limit}), "a model without limits gets only the bridge's");
 }

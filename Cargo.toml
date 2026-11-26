@@ -19,7 +19,7 @@ futures = "0.3"
 getrandom = "0.3"
 serde_json = "1"
 tokio = { version = "1", features = ["net", "sync", "rt", "macros"] }
-weirdnet-agent = "0.5.4"
+weirdnet-agent = "0.5.7"
 
 [dev-dependencies]
 async-trait = "0.1"

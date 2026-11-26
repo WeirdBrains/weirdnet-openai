@@ -8,7 +8,7 @@ through it.
 | Route | |
 |---|---|
 | `POST /v1/chat/completions` | streaming (SSE, `data: [DONE]`) or not; reasoning as `reasoning_content`; tool calls; usage |
-| `GET /v1/models` | the pool catalog, with `weirdnet: {state, purpose, replicas, context, revision, vision, audio, base, origin, license}` (`origin` is `hub`, `upload` or `train` and `license` an SPDX id when the node says, else `null`) |
+| `GET /v1/models` | the pool catalog, with `weirdnet: {state, purpose, replicas, context, revision, vision, audio, base, origin, license, max_request_bytes, limits}` (`origin` is `hub`, `upload` or `train` and `license` an SPDX id when the node says, else `null`; `limits` holds the media limits the node knows and `max_request_bytes`, the smaller of the bridge's and the node's) |
 | `POST /v1/completions` | a raw prompt (one per request), streaming or not; usage; 501 from nodes that can't take raw prompts |
 | `POST /v1/embeddings` | float vectors; `usage.prompt_tokens` from the node |
 | `GET /metrics` | Prometheus: `weirdnet_bridge_{requests,errors,cache_hits,standin}_total` |
@@ -52,4 +52,9 @@ parameters are ignored. Dropping a response cancels the pool request.
 Images and audio go to the pool unchanged (`weirdnet-agent` 0.5 content parts). The pool sends
 them only to a model whose catalog entry takes them (`vision`, `audio` in `/v1/models`): with no
 `model`, it picks one; a named text-only model, or a pool with no such model, is a 400 that says
-so. Request bodies may be up to 32 MiB.
+so.
+
+Request bodies may be up to 32 MiB (`DEFAULT_MAX_REQUEST_BYTES`) unless set with
+`Bridge::with_max_request_bytes`. A larger body gets a 413 (`request_too_large`) whose message
+names the limit, with the limit in the `x-weirdnet-max-request-bytes` header. infer/2 carries at
+most 32 MiB per message, so raising the limit past that only helps bodies that shrink on the way.
