@@ -1,6 +1,6 @@
 [package]
 name = "weirdnet-openai"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 rust-version = "1.99"
 description = "Loopback-only OpenAI-compatible bridge over a weirdnet-agent inference pool: chat completions (streaming, images, audio, video), models, embeddings, speech and transcriptions, with a bearer token, a Host check and no CORS."

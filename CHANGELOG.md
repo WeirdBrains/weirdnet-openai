@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-11-27
+
 ### Added
 
 - `video_url` content parts in chat messages (a `data:video/...` URL, as an object or a bare string) go to the pool as `ContentPart::VideoUrl`; remote and non-video URLs are a 400 (nothing is fetched).
