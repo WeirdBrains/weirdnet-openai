@@ -1,8 +1,9 @@
 //! OpenAI request bodies to `weirdnet-agent` infer/2 requests.
 
+use base64::Engine as _;
 use serde_json::{Map, Value};
-use weirdnet_agent::remote::infer::v2::{CacheMode, EmbedRequest, Request, ResponseFormat};
-use weirdnet_agent::{Content, ContentPart, Message, Role, ToolCall, ToolSpec};
+use weirdnet_agent::remote::infer::v2::{CacheMode, EmbedRequest, Request, ResponseFormat, ScriptTurn, SpeakInput, SpeakRequest, Voice};
+use weirdnet_agent::{AudioFormat, Content, ContentPart, Message, Role, ToolCall, ToolSpec};
 
 /// A request the bridge cannot take; answered with 400.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,8 +20,9 @@ fn object(body: Value) -> Result<Map<String, Value>, BadRequest> {
     }
 }
 
-/// One content part: `text`, `image_url` (a `data:image/...` URL, as an object or a bare string)
-/// or `input_audio` (`data` and `format`). Other types are refused.
+/// One content part: `text`, `image_url` (a `data:image/...` URL, as an object or a bare string),
+/// `input_audio` (`data` and `format`) or `video_url` (a `data:video/...` URL, as an object or a
+/// bare string). Other types are refused.
 fn part(p: &Value) -> Result<ContentPart, BadRequest> {
     match p["type"].as_str() {
         Some("text") => Ok(ContentPart::text(p["text"].as_str().unwrap_or_default())),
@@ -39,13 +41,23 @@ fn part(p: &Value) -> Result<ContentPart, BadRequest> {
             let a = &p["input_audio"];
             Ok(ContentPart::audio(a["data"].as_str().unwrap_or_default(), a["format"].as_str().unwrap_or_default()))
         }
+        Some("video_url") => {
+            let url = match &p["video_url"] {
+                Value::String(u) => u.as_str(),
+                o => o["url"].as_str().ok_or_else(|| bad("video_url parts need `video_url.url`"))?,
+            };
+            if !url.starts_with("data:video/") {
+                return Err(bad("video_url must be a data:video/...;base64, URL; remote video URLs are never fetched"));
+            }
+            Ok(ContentPart::video(url))
+        }
         Some(other) => Err(bad(format!("content parts of type `{other}` are not supported"))),
         None => Err(bad("content parts need a `type`")),
     }
 }
 
 /// Message content: a string, or parts. Text-only parts are joined into a string (the form every
-/// node reads); images and audio go through as parts, checked by [`Content::check`].
+/// node reads); images, audio and video go through as parts, checked by [`Content::check`].
 fn content(v: Option<&Value>) -> Result<Content, BadRequest> {
     match v {
         None | Some(Value::Null) => Ok(Content::default()),
@@ -309,6 +321,172 @@ pub fn embed(body: Value) -> Result<EmbedRequest, BadRequest> {
     Ok(req)
 }
 
+/// A `/v1/audio/speech` body (OpenAI's shape plus Weirdnet extensions under `weirdnet`): the
+/// request and whether to stream the audio as it comes (`stream_format: "audio"`).
+///
+/// - `input` (the text), `model`, `voice` (a preset name, or `{"id": name}`; never mapped to another
+///   voice: a name the model lacks is refused by the catalog check with its presets),
+///   `instructions`, `response_format` (`wav`, `pcm`, `mp3`, `opus` or `flac`; absent: the model's
+///   first format), `speed` (a multiple of the model's pace, sent as per mille).
+/// - `stream_format`: `"audio"` streams the bytes as the node sends them; `"sse"` is refused;
+///   absent: the whole file in one answer.
+/// - `weirdnet`: `language`, `seed`, `sample_rate`, `design` (a voice description), `ref_audio` (a
+///   `data:` URL only; remote URLs are never fetched) with `ref_text` and `consent` (a cloned voice),
+///   `script` (`[{"speaker": 0, "text": "..."}]`, instead of `input`) and `raw` (`input` goes to the
+///   engine with no template). At most one of `voice`, `design` and `ref_audio`.
+pub fn speech(body: Value) -> Result<(SpeakRequest, bool), BadRequest> {
+    let o = object(body)?;
+    let empty = Map::new();
+    let w = match o.get("weirdnet") {
+        None | Some(Value::Null) => &empty,
+        Some(Value::Object(w)) => w,
+        Some(_) => return Err(bad("`weirdnet` must be an object")),
+    };
+    let text = match o.get("input") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return Err(bad("`input` must be a string")),
+    };
+    let raw = flag(w, "raw")?;
+    let input = match (text, w.get("script")) {
+        (Some(_), Some(s)) if !s.is_null() => return Err(bad("send `input` or `weirdnet.script`, not both")),
+        (_, Some(Value::Array(turns))) => {
+            if raw {
+                return Err(bad("`weirdnet.raw` applies to `input`, not to a script"));
+            }
+            SpeakInput::Script(turns.iter().map(script_turn).collect::<Result<_, _>>()?)
+        }
+        (_, Some(s)) if !s.is_null() => return Err(bad("`weirdnet.script` must be an array of {\"speaker\": n, \"text\": \"...\"}")),
+        (Some(t), _) if raw => SpeakInput::Raw(t),
+        (Some(t), _) => SpeakInput::Text(t),
+        (None, _) => return Err(bad("`input` (the text to speak) is required")),
+    };
+    let mut req = SpeakRequest::with_input(input);
+    req.model = model(&o)?;
+
+    let preset = match o.get("voice") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(v)) => Some(v.clone()),
+        Some(Value::Object(v)) => match v.get("id") {
+            Some(Value::String(id)) => Some(id.clone()),
+            _ => return Err(bad("`voice` must be a preset name or {\"id\": name}")),
+        },
+        Some(_) => return Err(bad("`voice` must be a preset name or {\"id\": name}")),
+    };
+    let design = string_of(w, "weirdnet.design", "design")?;
+    let ref_audio = string_of(w, "weirdnet.ref_audio", "ref_audio")?;
+    let ref_text = string_of(w, "weirdnet.ref_text", "ref_text")?;
+    let consent = match w.get("consent") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => return Err(bad("`weirdnet.consent` must be true or false")),
+    };
+    if [preset.is_some(), design.is_some(), ref_audio.is_some()].iter().filter(|b| **b).count() > 1 {
+        return Err(bad("choose one voice: `voice` (a preset), `weirdnet.design` or `weirdnet.ref_audio`"));
+    }
+    if ref_audio.is_none() && (ref_text.is_some() || consent.is_some()) {
+        return Err(bad("`weirdnet.ref_text` and `weirdnet.consent` go with `weirdnet.ref_audio` (a voice to clone)"));
+    }
+    req.voice = match (preset, design, ref_audio) {
+        (Some(name), _, _) => Some(Voice::preset(name)),
+        (_, Some(description), _) => Some(Voice::design(description)),
+        (_, _, Some(url)) => {
+            let (mime, audio) = data_url(&url, "weirdnet.ref_audio")?;
+            Some(Voice::clone_from(audio, audio_format_of_mime(&mime), ref_text, consent.unwrap_or(false)))
+        }
+        _ => None,
+    };
+
+    req.instructions = match o.get("instructions") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s.trim().is_empty() => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return Err(bad("`instructions` must be a string")),
+    };
+    req.format = match o.get("response_format") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(f)) => Some(AudioFormat::parse(f).ok_or_else(|| {
+            bad(format!(
+                "`response_format` `{f}` is not one this bridge knows; use one of wav, pcm, mp3, opus or flac (the model's formats are in /v1/models)"
+            ))
+        })?),
+        Some(_) => return Err(bad("`response_format` must be a string")),
+    };
+    req.speed = match f32_of(&o, "speed")? {
+        None => None,
+        Some(s) if !s.is_finite() || s <= 0.0 || s > 100.0 => return Err(bad("`speed` must be a positive number (1.0 is the model's pace)")),
+        Some(s) => Some(((f64::from(s) * 1000.0).round() as u32).max(1)),
+    };
+    let stream = match o.get("stream_format") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(f)) if f == "audio" => true,
+        Some(Value::String(f)) if f == "sse" => {
+            return Err(bad("`stream_format` \"sse\" is not supported; use \"audio\" (raw bytes as they come) or leave it out for the whole file"));
+        }
+        Some(_) => return Err(bad("`stream_format` must be \"audio\" (or absent)")),
+    };
+    req.stream = stream;
+    req.language = string_of(w, "weirdnet.language", "language")?;
+    req.seed = match w.get("seed") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_u64().ok_or_else(|| bad("`weirdnet.seed` must be a whole number"))?),
+    };
+    req.sample_rate = match w.get("sample_rate") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(|| bad("`weirdnet.sample_rate` must be a whole number of Hz"))?),
+    };
+    Ok((req, stream))
+}
+
+fn string_of(o: &Map<String, Value>, name: &str, key: &str) -> Result<Option<String>, BadRequest> {
+    match o.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(bad(format!("`{name}` must be a string"))),
+    }
+}
+
+fn script_turn(t: &Value) -> Result<ScriptTurn, BadRequest> {
+    let speaker = t["speaker"].as_u64().and_then(|n| u8::try_from(n).ok()).ok_or_else(|| bad("each script turn needs a `speaker` from 0 to 255"))?;
+    let text = t["text"].as_str().ok_or_else(|| bad("each script turn needs `text`"))?;
+    Ok(ScriptTurn::new(speaker, text))
+}
+
+/// The MIME type and bytes of a base64 `data:` URL. Anything else (`http(s)://`, `file://`, a
+/// non-base64 `data:` URL) is refused: the bridge never fetches a URL.
+fn data_url(url: &str, name: &str) -> Result<(String, Vec<u8>), BadRequest> {
+    let Some(rest) = url.strip_prefix("data:") else {
+        return Err(bad(format!("`{name}` must be a data: URL (data:audio/wav;base64,...); remote and file URLs are never fetched")));
+    };
+    let Some((head, data)) = rest.split_once(',') else {
+        return Err(bad(format!("`{name}` is not a valid data: URL")));
+    };
+    let mut params = head.split(';');
+    let mime = params.next().unwrap_or_default().trim().to_ascii_lowercase();
+    if !params.any(|p| p.trim().eq_ignore_ascii_case("base64")) {
+        return Err(bad(format!("`{name}` must be a base64 data: URL (data:audio/wav;base64,...)")));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data.trim()).map_err(|e| bad(format!("`{name}` has invalid base64: {e}")))?;
+    Ok((mime, bytes))
+}
+
+/// The `input_audio`-style format name for an audio MIME type: `audio/wav` is `wav`,
+/// `audio/mpeg` is `mp3`, and otherwise the subtype (`audio/flac` is `flac`).
+pub(crate) fn audio_format_of_mime(mime: &str) -> String {
+    let mime = mime.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    let sub = mime.split_once('/').map_or(mime.as_str(), |(_, s)| s);
+    match sub {
+        "wav" | "x-wav" | "wave" | "vnd.wave" => "wav",
+        "mpeg" | "mp3" | "mpeg3" | "x-mpeg-3" | "mpga" => "mp3",
+        "x-flac" | "flac" => "flac",
+        "ogg" | "opus" => "ogg",
+        "x-m4a" | "m4a" | "mp4" | "aac" => "m4a",
+        other => other.strip_prefix("x-").unwrap_or(other),
+    }
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +571,84 @@ mod tests {
         assert!(chat(json!({"messages": msgs, "continue_final_message": true, "add_generation_prompt": true})).is_err());
         assert!(chat(json!({"messages": [{"role": "user", "content": "q"}], "continue_final_message": true})).is_err());
         assert!(chat(json!({"messages": msgs, "continue_final_message": "yes"})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn video_parts_take_data_urls_only() {
+        let mp4 = "data:video/mp4;base64,AAAAIGZ0eXBpc29t";
+        for p in [json!({"type": "video_url", "video_url": {"url": mp4}}), json!({"type": "video_url", "video_url": mp4})] {
+            assert_eq!(part(&p), Ok(ContentPart::video(mp4)));
+        }
+        for url in ["https://example.com/a.mp4", "file:///a.mp4", "data:image/png;base64,AAAA"] {
+            let e = part(&json!({"type": "video_url", "video_url": {"url": url}})).unwrap_err();
+            assert!(e.0.contains("data:video/"), "{e:?}");
+        }
+        assert!(part(&json!({"type": "video_url", "video_url": {}})).is_err());
+    }
+
+    #[test]
+    fn speech_bodies() {
+        let (r, stream) =
+            speech(json!({"model": "tts", "input": "Hi", "voice": "vivian", "instructions": "warm", "response_format": "pcm", "speed": 1.2}))
+                .unwrap();
+        assert!(!stream && !r.stream);
+        assert_eq!(r.model.as_deref(), Some("tts"));
+        assert_eq!(r.input, SpeakInput::Text("Hi".into()));
+        assert_eq!(r.voice, Some(Voice::preset("vivian")));
+        assert_eq!(r.instructions.as_deref(), Some("warm"));
+        assert_eq!(r.format, Some(AudioFormat::Pcm16));
+        assert_eq!(r.speed, Some(1200));
+
+        let (r, stream) =
+            speech(json!({"input": "Hi", "stream_format": "audio", "weirdnet": {"raw": true, "seed": 3, "language": "en", "sample_rate": 16000}}))
+                .unwrap();
+        assert!(stream && r.stream);
+        assert_eq!(r.input, SpeakInput::Raw("Hi".into()));
+        assert_eq!((r.seed, r.language.as_deref(), r.sample_rate), (Some(3), Some("en"), Some(16000)));
+
+        let (r, _) = speech(json!({"weirdnet": {"script": [{"speaker": 0, "text": "a"}, {"speaker": 1, "text": "b"}]}})).unwrap();
+        assert_eq!(r.input, SpeakInput::Script(vec![ScriptTurn::new(0, "a"), ScriptTurn::new(1, "b")]));
+
+        let (r, _) =
+            speech(json!({"input": "Hi", "weirdnet": {"ref_audio": "data:audio/mpeg;base64,SUQz", "ref_text": "it says", "consent": true}})).unwrap();
+        assert_eq!(r.voice, Some(Voice::clone_from(b"ID3".to_vec(), "mp3", Some("it says".into()), true)));
+        let (r, _) = speech(json!({"input": "Hi", "weirdnet": {"design": "a calm narrator"}})).unwrap();
+        assert_eq!(r.voice, Some(Voice::design("a calm narrator")));
+
+        for (body, needle) in [
+            (json!({"input": "Hi", "weirdnet": {"script": []}, "model": "x"}), "not both"),
+            (json!({"input": 3}), "`input` must be a string"),
+            (json!({"input": "Hi", "voice": 3}), "preset name"),
+            (json!({"input": "Hi", "speed": -1}), "positive"),
+            (json!({"input": "Hi", "stream_format": "chunks"}), "\"audio\""),
+            (json!({"input": "Hi", "weirdnet": "x"}), "`weirdnet` must be an object"),
+            (json!({"input": "Hi", "weirdnet": {"ref_audio": "http://x/a.wav"}}), "data: URL"),
+            (json!({"weirdnet": {"raw": true, "script": [{"speaker": 0, "text": "a"}]}}), "applies to `input`"),
+            (json!({"weirdnet": {"script": [{"speaker": 300, "text": "a"}]}}), "from 0 to 255"),
+        ] {
+            let e = speech(body.clone()).unwrap_err();
+            assert!(e.0.contains(needle), "{body}: {e:?}");
+        }
+    }
+
+    #[test]
+    fn audio_mime_names() {
+        for (mime, f) in [
+            ("audio/wav", "wav"),
+            ("audio/x-wav", "wav"),
+            ("audio/mpeg", "mp3"),
+            ("audio/flac", "flac"),
+            ("audio/ogg; codecs=opus", "ogg"),
+            ("audio/webm", "webm"),
+        ] {
+            assert_eq!(audio_format_of_mime(mime), f, "{mime}");
+        }
     }
 }
 

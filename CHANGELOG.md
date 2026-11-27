@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- `video_url` content parts in chat messages (a `data:video/...` URL, as an object or a bare string) go to the pool as `ContentPart::VideoUrl`; remote and non-video URLs are a 400 (nothing is fetched).
+- `POST /v1/audio/speech` over `Pool::speak` and `Pool::speak_stream` (infer/2 `Speak`): OpenAI's `input`, `model`, `voice`, `instructions`, `response_format`, `speed` and `stream_format: "audio"`, plus `weirdnet.{language, seed, sample_rate, design, ref_audio, ref_text, consent, script, raw}`. Checked against the catalog first: unknown voices such as `alloy` are a 400 listing the model's presets, never remapped. `Content-Type` carries the real format and rate, with `x-audio-sample-rate`, `x-weirdnet-audio-channels` and `x-weirdnet-ignored`. `request::speech` parses the body.
+- `POST /v1/audio/transcriptions` (multipart) over `Pool::transcribe`, answering `json`, `verbose_json`, `text`, `srt` or `vtt`.
+- `/v1/models` has `weirdnet.video`, `weirdnet.inputs` (`{vision, audio, video}`) and `weirdnet.speech` (a speaking model's profile, when reported); `weirdnet.limits` now includes the video limits.
+
+### Changed
+
+- Needs weirdnet-agent 0.5.11. CI runs on Linux, macOS and Windows.
+
 ## [0.2.4] - 2026-11-26
 
 ### Added

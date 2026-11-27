@@ -3,7 +3,7 @@ name = "weirdnet-openai"
 version = "0.2.4"
 edition = "2024"
 rust-version = "1.99"
-description = "Loopback-only OpenAI-compatible bridge over a weirdnet-agent inference pool: chat completions (streaming), models and embeddings, with a bearer token, a Host check and no CORS."
+description = "Loopback-only OpenAI-compatible bridge over a weirdnet-agent inference pool: chat completions (streaming, images, audio, video), models, embeddings, speech and transcriptions, with a bearer token, a Host check and no CORS."
 authors = ["Weird Brains LLC"]
 license = "BSD-3-Clause"
 repository = "https://github.com/WeirdBrains/weirdnet-openai"
@@ -14,16 +14,17 @@ categories = ["web-programming::http-server"]
 include = ["src/**", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [dependencies]
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "multipart", "tokio"] }
+base64 = "0.22"
 futures = "0.3"
 getrandom = "0.3"
 serde_json = "1"
 tokio = { version = "1", features = ["net", "sync", "rt", "macros"] }
-weirdnet-agent = "0.5.7"
+weirdnet-agent = "0.5.11"
 
 [dev-dependencies]
 async-trait = "0.1"
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "stream"] }
 tokio = { version = "1", features = ["net", "sync", "rt", "rt-multi-thread", "macros", "time"] }
 
 [package.metadata.docs.rs]

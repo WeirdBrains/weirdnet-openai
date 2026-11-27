@@ -2,7 +2,8 @@
 //!
 //! Local tools that speak the OpenAI API (editors, notebooks, `curl`) reach the user's
 //! inference nodes through it: `/v1/chat/completions` and `/v1/completions` (streaming or not),
-//! `/v1/models` (the pool catalog) and `/v1/embeddings`, plus Prometheus `/metrics`.
+//! `/v1/models` (the pool catalog), `/v1/embeddings`, `/v1/audio/speech` and
+//! `/v1/audio/transcriptions`, plus Prometheus `/metrics`.
 //!
 //! It binds `127.0.0.1` only, checks the `Host` header against its own address (DNS rebinding),
 //! requires a bearer token of at least 16 characters (compared in constant time), and sends no
@@ -12,10 +13,13 @@
 //! with `"cache": false` or `x-weirdnet-cache: off`, and refreshes it with `"cache": "refresh"`
 //! or `x-weirdnet-cache: refresh` (infer/2 `Request::cache`, `weirdnet-agent` 0.5.1).
 //!
-//! Chat messages may carry image (`image_url`, a `data:image/...` URL) and audio (`input_audio`)
-//! parts. They go to the pool unchanged, which sends them only to a model whose catalog entry
-//! takes them; when none does the answer is 400. `/v1/models` lists `weirdnet.vision` and
-//! `weirdnet.audio` per model, `weirdnet.base` for a LoRA adapter (its base model), and
+//! Chat messages may carry image (`image_url`, a `data:image/...` URL), audio (`input_audio`) and
+//! video (`video_url`, a `data:video/...` URL; remote URLs are refused, never fetched) parts. They
+//! go to the pool unchanged, which sends them only to a model whose catalog entry takes them; when
+//! none does the answer is 400. `/v1/models` lists `weirdnet.vision`, `weirdnet.audio` and
+//! `weirdnet.video` per model (also together as `weirdnet.inputs`), `weirdnet.purpose` (`chat`,
+//! `embed`, `transcribe`, `speak`, ...), `weirdnet.speech` for a speaking model that reports a
+//! profile (catalog/1 `CatalogModel::speech`, `weirdnet-agent` 0.5.11), `weirdnet.base` for a LoRA adapter (its base model), and
 //! `weirdnet.origin` (`hub`, `upload` or `train`) and `weirdnet.license` when the node says
 //! (catalog/1 `CatalogModel::origin`/`license`, `weirdnet-agent` 0.5.4; `null` otherwise). A body's
 //! `"adapter_scale"` sets how strongly an adapter applies for that request (infer/2
@@ -29,10 +33,21 @@
 //! `weirdnet.limits` (catalog/1 `CatalogModel::limits`, `weirdnet-agent` 0.5.7; only the limits the
 //! node knows).
 //!
+//! `POST /v1/audio/speech` speaks text over infer/2 `Speak` ([`request::speech`] lists the body):
+//! the request is checked against the catalog first, so a voice the model lacks (OpenAI's `alloy`,
+//! say) is a 400 that lists the model's presets, never mapped to another voice. The answer's
+//! `Content-Type` is the real format (`audio/pcm;rate=24000` for raw PCM), with
+//! `x-audio-sample-rate` when the node knows it; `stream_format: "audio"` streams the bytes as they
+//! come. `POST /v1/audio/transcriptions` (multipart: `file`, `model`, `language`, `prompt`,
+//! `response_format` `json`, `verbose_json`, `text`, `srt` or `vtt`, and
+//! `timestamp_granularities[]=segment`) runs infer/2 `Transcribe`. Both are bounded by the same
+//! request limit (a 413 with `x-weirdnet-max-request-bytes`); neither is cached.
+//!
 //! `/v1/completions` sends the prompt as an infer/2 raw prompt (`weirdnet-agent` 0.4.1); nodes
 //! that can't take one answer 501. A streamed answer waits up to [`EARLY_META_WAIT`] after a node
 //! accepts it for early metadata, so `x-weirdnet-cache: hit` is sent on streams too.
 
+mod audio;
 pub mod request;
 
 use std::convert::Infallible;
@@ -150,6 +165,8 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/v1/chat/completions", post(chat))
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/audio/speech", post(audio::speech))
+        .route("/v1/audio/transcriptions", post(audio::transcriptions))
         .route("/metrics", get(metrics))
         .fallback(not_found)
         .layer(DefaultBodyLimit::max(state.max_request_bytes))
@@ -294,18 +311,23 @@ async fn models(State(st): State<Arc<AppState>>) -> Response {
                     let max_request_bytes = m.limits.max_request_bytes.map_or(st.max_request_bytes as u64, |n| n.min(st.max_request_bytes as u64));
                     let mut limits = m.limits;
                     limits.max_request_bytes = Some(max_request_bytes);
-                    json!({
+                    let mut v = json!({
                         "id": m.id,
                         "object": "model",
                         "created": 0,
                         "owned_by": "weirdnet",
                         "weirdnet": {
                             "state": m.state, "purpose": m.purpose, "replicas": m.replicas, "context": m.context, "revision": m.revision,
-                            "vision": m.inputs.vision, "audio": m.inputs.audio, "base": m.base,
-                            "origin": m.origin, "license": m.license,
+                            "vision": m.inputs.vision, "audio": m.inputs.audio, "video": m.inputs.video,
+                            "inputs": {"vision": m.inputs.vision, "audio": m.inputs.audio, "video": m.inputs.video},
+                            "base": m.base, "origin": m.origin, "license": m.license,
                             "max_request_bytes": max_request_bytes, "limits": limits,
                         },
-                    })
+                    });
+                    if let Some(speech) = &m.speech {
+                        v["weirdnet"]["speech"] = json!(speech);
+                    }
+                    v
                 })
                 .collect();
             axum::Json(json!({"object": "list", "data": data})).into_response()
